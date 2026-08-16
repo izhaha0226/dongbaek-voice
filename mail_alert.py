@@ -105,11 +105,19 @@ def should_alert(sender: str, address: str, subject: str) -> bool:
         return False
 
     hay = f"{sender} {address} {subject}".lower()
-    # 기다리라고 이르신 것과 VIP 는 방식과 무관하게 알린다.
-    # 띄어쓰기는 받아쓰기마다 흔들리므로 지우고 견준다 ("강남 한빛건설"/"강남한빛건설").
     flat = hay.replace(" ", "")
-    if any(w.lower().replace(" ", "") in flat for w in watch_list()):
-        return True
+    # 기다리라고 이르신 것과 VIP 는 방식과 무관하게 알린다.
+    #
+    # ⚠ 통짜로 견주면 안 된다. 말씀하신 차례와 발신자가 적은 차례가 다르다 —
+    #   2026-08-16 실사례: "강남 한빛건설에서 메일 오면 알려줘" 하셨는데 실제
+    #   발신자는 "한빛건설강남" 였다. 통짜 '강남한빛건설' 으로 찾으니 안 걸렸고,
+    #   기다리시던 메일이 그냥 지나갔다.
+    #   그래서 낱말로 쪼개 **전부 들어 있으면** 걸린 것으로 본다. 차례가
+    #   바뀌어도, 사이에 다른 말이 끼어도 잡힌다.
+    for w in watch_list():
+        words = [x for x in w.lower().split() if x]
+        if words and all(x in flat for x in words):
+            return True
     if any(v.lower() in hay for v in (config.MAIL_NUDGE_VIP or [])):
         return True
     if m == VIP:
@@ -124,6 +132,41 @@ def should_alert(sender: str, address: str, subject: str) -> bool:
         return mail_local.notice_service(sender, address) is None
     except Exception:
         return True                      # 판단이 안 되면 알리는 쪽으로
+
+
+def seen_load() -> set[str]:
+    """이미 알린 메일의 표. 데몬을 다시 띄워도 기억한다.
+
+    ⚠ 없으면 재기동할 때마다 직전 한 시간치가 통째로 사라진다.
+      예전 코드는 뜨자마자 첫 판을 '이미 본 것' 으로 치고 넘겼다 —
+      그러지 않으면 띄우는 순간 한 시간치가 한꺼번에 쏟아지기 때문이다.
+      그런데 그 대가로, 재기동 직전에 온 메일은 영영 안 알려졌다.
+      2026-08-16 에 실제로 그렇게 놓쳤다(그날 데몬을 네 번 재기동했다).
+
+      표를 파일에 남기면 둘 다 풀린다 — 쏟아지지도, 놓치지도 않는다.
+    """
+    try:
+        d = json.loads(_FILE.read_text())
+        return set(d.get("seen") or [])
+    except (OSError, ValueError):
+        return set()
+
+
+def seen_save(keys: set[str]) -> None:
+    # 오래된 것까지 다 들고 있을 이유는 없다. 최근 것만 남긴다.
+    _write(seen=sorted(keys)[-300:])
+
+
+def seen_known() -> bool:
+    """표가 한 번이라도 만들어졌는가.
+
+    처음 켠 판에서는 지난 한 시간치를 알리지 않는다 — 그건 '새 메일' 이
+    아니라 그냥 받은 편지함이다. 표가 있으면 그 뒤로는 전부 새 것이다.
+    """
+    try:
+        return "seen" in json.loads(_FILE.read_text())
+    except (OSError, ValueError):
+        return False
 
 
 def line(sender: str, subject: str) -> str:

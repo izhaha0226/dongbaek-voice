@@ -121,8 +121,28 @@ try:
           mail_alert.should_alert("아무개", "a@b.com", "강남 한빛건설 관련 회신"), True)
     check("상관없는 메일은 그대로 조용히",
           mail_alert.should_alert("김부장", "kim@co.kr", "주간보고"), False)
+    # ⚠ 말씀하신 차례와 발신자가 적은 차례는 다르다. 2026-08-16 실사례 —
+    #   "강남 한빛건설에서 메일 오면 알려줘" 하셨는데 발신자는 "한빛건설강남"
+    #   였다. 통짜로 견주니 안 걸렸고 기다리시던 메일이 그냥 지나갔다.
+    check("차례가 바뀌어도 걸린다",
+          mail_alert.should_alert("한빛건설강남", "hanbit-gangnam@naver.com",
+                                  "한빛건설강남_광고 운영 정책 회의 자료"), True)
+    check("낱말 하나만 겹치면 안 걸린다",
+          mail_alert.should_alert("강남구청", "x@y.com", "주민 안내"), False)
+
     mail_alert.watch_clear()
     check("지우면 비워진다", mail_alert.watch_list(), [])
+
+    print("\n[5-1] 재기동해도 기억한다")
+    # ⚠ 예전에는 뜨자마자 첫 판을 통째로 '본 것' 으로 치고 넘겼다. 그 대가로
+    #   재기동 직전에 온 메일은 영영 안 알려졌다 — 2026-08-16 에 배포하느라
+    #   네 번 재기동했고 기다리시던 메일이 그 틈으로 빠졌다.
+    check("처음엔 표가 없다 (첫 판은 안 알림)", mail_alert.seen_known(), False)
+    mail_alert.seen_save({"보낸이|제목"})
+    check("저장하면 표가 생긴다", mail_alert.seen_known(), True)
+    check("다시 읽어도 그대로", mail_alert.seen_load(), {"보낸이|제목"})
+    mail_alert.seen_save({f"{i}|x" for i in range(400)})
+    check("표는 300개까지만 들고 있는다", len(mail_alert.seen_load()), 300)
 finally:
     try:
         mail_alert._FILE.unlink()

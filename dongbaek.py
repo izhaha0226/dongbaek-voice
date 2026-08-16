@@ -837,14 +837,24 @@ def _nudge_loop() -> None:
                 next_mail = time.monotonic() + config.MAIL_NUDGE_CHECK_SEC
                 import mail_local
 
-                first_pass = not seen_mail
+                # 이미 알린 표는 파일에 남는다 — 재기동해도 기억한다.
+                #
+                # ⚠ 예전에는 뜨자마자 첫 판을 통째로 '본 것' 으로 치고 넘겼다.
+                #   그러지 않으면 띄우는 순간 한 시간치가 쏟아지기 때문인데,
+                #   그 대가로 재기동 직전에 온 메일은 영영 안 알려졌다.
+                #   2026-08-16 에 실제로 그렇게 놓쳤다 — 그날 배포하느라 데몬을
+                #   네 번 재기동했고, 기다리시던 메일이 그 틈으로 빠졌다.
+                if not seen_mail:
+                    seen_mail |= mail_alert.seen_load()
+                first_pass = not mail_alert.seen_known()
+                touched = False
                 for m in (mail_local.received_brief(hours=1, max_scan=10) or []):
                     key = m["from"] + "|" + m["subject"]
                     if key in seen_mail:
                         continue
                     seen_mail.add(key)
-                    # ⚠ 처음 도는 판은 알리지 않는다. 데몬을 띄운 순간 지난
-                    #   한 시간치가 전부 '새 메일' 로 보여 한꺼번에 쏟아진다.
+                    touched = True
+                    # 처음 켠 판만 넘긴다 — 그건 새 메일이 아니라 받은 편지함이다.
                     if first_pass:
                         continue
                     if not mail_alert.should_alert(m["from"], m.get("addr", ""),
@@ -861,6 +871,8 @@ def _nudge_loop() -> None:
                                               f"{m['from']}\n{m['subject']}")
                     except Exception:
                         pass
+                if touched:
+                    mail_alert.seen_save(seen_mail)
         except Exception as e:
             log(f"능동 알림 오류: {type(e).__name__}: {e}")
 
