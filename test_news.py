@@ -5,6 +5,10 @@
 위키 파일은 볼트의 기존 이름 규칙을 따른다.
     python test_news.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import json
 import sys
 import tempfile

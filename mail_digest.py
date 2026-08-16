@@ -304,12 +304,15 @@ def run(dry_run: bool = False, hours: int = LOOKBACK_HOURS) -> str:
     if not added:
         return f"메일 {len(cands)}통을 살펴봤지만 등록한 일정은 없습니다.{junk_note}"
 
+    import speak
+
     lines = []
     for label, start in added[:3]:
         yo = "월화수목금토일"[start.weekday()]
         ampm = "오전" if start.hour < 12 else "오후"
         h12 = start.hour if 1 <= start.hour <= 12 else (start.hour - 12 or 12)
-        lines.append(f"{start.month}월 {start.day}일 {yo}요일 {ampm} {h12}시 {label}")
+        lines.append(f"{start.month}월 {start.day}일 {yo}요일 {ampm} "
+                      f"{speak.clock_words(h12, 0)} {label}")
     tail = f" 그 외 {len(added) - 3}건 더 등록했습니다." if len(added) > 3 else ""
     return (f"메일에서 일정 {len(added)}건을 등록했습니다. "
             + ", ".join(lines) + "." + tail + junk_note)

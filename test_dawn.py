@@ -4,6 +4,10 @@
 시간을 조작하지 않는다 — DAWN_HOURS 를 '지금 포함/제외' 로 바꿔 양쪽을
 다 지나가게 한다 (끝나면 원복).
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 from datetime import datetime
 
 import numpy as np

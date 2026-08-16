@@ -5,6 +5,10 @@
 비슷한 말이 섞여 귀가 열렸고 동백이 미팅 한복판에 "메모리 48기가…" 를
 낭독했다. 소리·클로드 없이 판정과 봉인 논리만 검사한다.
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import config
 import router
 import speak

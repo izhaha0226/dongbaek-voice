@@ -5,6 +5,10 @@
 퇴근 브리핑은 위키(업무일지)를 쓴다.
     python test_briefing.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import sys
 import tempfile
 from datetime import date

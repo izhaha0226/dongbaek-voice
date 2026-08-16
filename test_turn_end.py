@@ -8,6 +8,10 @@
 그래서 골든값을 박아둔다. 여기가 깨지면 판정을 믿으면 안 된다.
     python test_turn_end.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import sys
 
 import numpy as np

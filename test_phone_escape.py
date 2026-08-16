@@ -14,6 +14,10 @@ PHONE_HOLD_SEC 가 10분이라 그동안 갇힌다.
 
     python test_phone_escape.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import config
 
 FAIL = []

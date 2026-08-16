@@ -5,6 +5,10 @@
 음성 확인 없이 바로 실행되는 것이다. 그 경로를 집중적으로 막았는지 본다.
     python test_local.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import router
 
 FAIL = []
@@ -119,7 +123,10 @@ ads_local.speak = lambda text: None          # 광고 조각이 죽어도 브리
 b = router.handle_local("브리핑해줘")
 ads_local.speak = _real_ads_speak
 check("날씨 포함", "27도" in b, True)
-check("일정 포함", "14시 강남 미팅" in b, True)
+# ⚠ 시각은 사람이 말하듯 읽는다 (2026-08-16 사장님 교정 "십이오팔이 아니고
+#   열두시오십팔분"). 브리핑은 귀로 듣는 자리라 24시간 표기를 그대로 읽으면
+#   '십사시' 가 된다 — 아무도 그렇게 말하지 않는다.
+check("일정 포함", "오후 두시 강남 미팅" in b, True)
 check("메일 포함", "3통" in b, True)
 check("'문서 브리핑'은 Claude 로", router.handle_local("이 문서 브리핑해줘"), None)
 
@@ -182,6 +189,28 @@ print("\n[6] 메일 발송은 로컬이 건드리지 않음 (게이트+MCP 경�
 for q in ["홍길동한테 메일 보내줘", "메일 발송해", "이 메일에 답장해줘"]:
     check(f"{q!r} → 로컬 미처리", router.handle_local(q, elevated=False), None)
     check(f"{q!r} → 게이트 감지", router.danger_hit(q) is not None, True)
+
+print("\n[볼륨 — 되돌리기 어려운 쪽일수록 좁게]")
+# ⚠ 2026-08-14 18:04 실사고. 사장님이 옆에서 사적인 대화를 하시는 중에
+#   "혹시 빨간색 이미 꺼져 있어? 뭔 소리야…" 가 명령으로 잡혔고,
+#   '소리' + '꺼' 두 낱말이 맞아떨어져 음소거가 걸렸다. MERGE 가 같은
+#   판정을 네 번 반복했고, 그대로 13시간 소리가 꺼져 있었다.
+#   사장님은 당신이 끈 줄도 모르셨고, 동백은 불러도 대답이 안 들렸다.
+#   소리를 끄면 동백이 "껐습니다" 라고 알릴 방법조차 사라진다.
+import router as _r
+_calls = []
+_real_osa, _r._osa = _r._osa, lambda s: _calls.append(s)
+for said, want in [("소리 좀 키워줘", True), ("볼륨 올려", True), ("소리 줄여", True),
+                   ("음소거해줘", True), ("무음으로", True),
+                   # 사고 문장 그대로
+                   ("혹시 빨간색 이미 꺼져 있어? 뭔 소리야. 근데 왜 그렇게 말 쉽게 해?", False),
+                   ("불 꺼", False),
+                   ("소리가 안 들리는데 뭐가 문제야", False),
+                   ("그 소리 듣고 깜짝 놀랐잖아", False)]:
+    _calls.clear()
+    _r.handle_local(_r.normalize(said))
+    check(f"{'실행' if want else '무시'}: {said[:26]!r}", bool(_calls), want)
+_r._osa = _real_osa
 
 print()
 if FAIL:

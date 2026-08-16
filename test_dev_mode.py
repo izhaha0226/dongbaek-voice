@@ -11,6 +11,10 @@
 유일한 방어선이다. 여기가 무너지면 승인 없이 배포까지 갈 수 있다.
     python test_dev_mode.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import config
 import bridge
 import code_guard

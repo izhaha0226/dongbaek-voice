@@ -6,6 +6,10 @@
 겨누는지가 핵심이다.
     python test_self_improve.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import subprocess
 import sys
 import tempfile
@@ -111,16 +115,20 @@ print("\n[4b] 관찰 — 아이디어 모드의 재료가 실데이터에서 나
 import json as _json
 from datetime import datetime as _dt
 
-fake_tr = repo / "transcript.jsonl"
+# 정본이 DB 로 옮겨졌다(2026-08-16). 관찰 재료도 DB 에서 나오므로 임시
+# DB 를 갈아 끼운다 — 사장님 진짜 기록을 읽거나 더럽히면 안 된다.
+import dbstore  # noqa: E402
+
 now = _dt.now().isoformat(timespec="seconds")
 rows = ([{"ts": now, "route": "claude", "command": "레일웨이 상태 알려줘"}] * 3
         + [{"ts": now, "route": "local", "command": "지금 몇 시야"}] * 2
         + [{"ts": "2000-01-01T00:00:00", "route": "claude", "command": "옛날 명령"}])
-fake_tr.write_text("\n".join(_json.dumps(r, ensure_ascii=False) for r in rows))
-_real_tr = si.config.TRANSCRIPT_LOG
-si.config.TRANSCRIPT_LOG = fake_tr
+_real_db = dbstore.DB_PATH
+dbstore.DB_PATH = repo / "테스트.db"
+for _r in rows:
+    dbstore.save(_r)
 obs = si._observations()
-si.config.TRANSCRIPT_LOG = _real_tr
+dbstore.DB_PATH = _real_db
 check("분포 관찰", any("claude 3건" in o for o in obs), True)
 check("반복 명령 후보", any("레일웨이 상태 알려줘" in o for o in obs), True)
 check("옛 기록 제외", any("옛날" in o for o in obs), False)
@@ -146,6 +154,65 @@ si._observations = _real_obs
 si._save_stamps = _real_save
 check("종료 코드 0", rc, 0)
 check("클로드 호출 0회", called["n"], 0)
+
+print("\n[6] 러너가 사람 작업을 자기 커밋에 담지 않는다")
+# ⚠ `git add -A` 였다. 사람이 편집 중이던 미커밋 파일까지 통째로 담아,
+#   커밋 메시지와 내용물이 어긋난 커밋이 됐다 — 2026-08-14 하루에 다섯 번,
+#   한 번은 편집 도중에 걸려 반쪽 상태로 커밋됐다.
+import inspect
+_src = inspect.getsource(si)
+check("add -A 를 쓰지 않는다", '"add", "-A"' in _src, False)
+check("바뀐 파일만 담는다", "_changed_since" in inspect.getsource(si.main), True)
+# 파일명 파싱 — _git 이 출력을 strip 해서 첫 줄 앞 공백이 사라진다.
+# 고정 위치로 자르면 'config.py' 가 'onfig.py' 가 된다 (실제로 그랬다).
+import re as _re
+for raw, want in [("M config.py", "config.py"), ("?? new.py", "new.py"),
+                  ("R  a.py -> b.py", "b.py")]:
+    m = _re.match(r"^\s*\S{1,2}\s+(.*)$", raw)
+    got = m.group(1).strip().strip('"') if m else None
+    if got and " -> " in got:
+        got = got.split(" -> ", 1)[1]
+    check(f"파일명 파싱: {raw!r}", got, want)
+
+print("\n[7] 검증 도구(테스트)는 스스로 못 고친다")
+# 검증이 테스트뿐인데 그 테스트를 자기가 고치면 검증이 무의미해진다.
+# 실제로 자가개선 10건 중 2건이 테스트 수정이었고 둘 다 "시계를 믿던 것" 이었다.
+check("tests/ 변경을 막는 자리가 있다", "touched_tests" in inspect.getsource(si.main), True)
+
+print("\n[8] 시도한 것을 기억한다 — 롤백이 지식이 되게")
+# ⚠ 이게 없어서 일곱 번 롤백하고 일곱 번 다 잊었다. 어젯밤 깨진 방법을
+#   오늘 밤 또 시도한다. 시행착오는 있는데 착오가 쌓이지 않았다.
+check("_history_add 있음", callable(getattr(si, "_history_add", None)), True)
+check("_history_lines 있음", callable(getattr(si, "_history_lines", None)), True)
+check("FIX 프롬프트가 지난 시도를 싣는다", "{history}" in si._PROMPT_FIX, True)
+check("IDEA 프롬프트도 싣는다", "{history}" in si._PROMPT_IDEA, True)
+# ⚠ 테스트 프로세스는 이력을 더럽히지 않는다 (_report·_write_note 와 같은 가드)
+_before = si.HISTORY_FILE.exists() and si.HISTORY_FILE.stat().st_size or 0
+si._history_add("fix", "테스트가남긴것", ["x.py"])
+_after = si.HISTORY_FILE.exists() and si.HISTORY_FILE.stat().st_size or 0
+check("테스트가 이력을 안 남긴다", _after, _before)
+
+print("\n[9] 트리가 더러우면 물러나지 않고 자기 자리를 만든다")
+# 사장님 지시 (2026-08-15): "트리가 지저분하다고 자가정비가 작동을 안 한다.
+# 스스로 신규 트리를 만들어서 하든 트리를 정리하고 하든 스스로 결정하게 해줘."
+# 예전엔 그냥 물러났고, 사람이 코드를 만지는 날은 통째로 쉬었다 (37회 중 8회).
+#
+# ⚠ 사람 작업은 건드리지 않는다. 스태시도 커밋도 하지 않는다 — 남의 작업에
+#   손대는 순간 '정비' 가 아니라 사고다. 자기 자리를 새로 만들 뿐이다.
+_wsrc = inspect.getsource(si)
+check("스태시로 남의 작업을 치우지 않는다", "stash" in _wsrc, False)
+check("워크트리를 만든다", "worktree" in _wsrc, True)
+check("_workspace_open 있음", callable(getattr(si, "_workspace_open", None)), True)
+check("_workspace_land 있음", callable(getattr(si, "_workspace_land", None)), True)
+# 깨끗하면 제자리에서 — 굳이 워크트리를 파지 않는다
+_real_clean = si._tree_clean
+si._tree_clean = lambda repo: True
+w, b, why = si._workspace_open()
+check("깨끗하면 제자리", (w, b), (si.ROOT, ""))
+si._tree_clean = _real_clean
+# 가져오기는 --ff-only 다. 사람 작업 위에 병합 커밋을 얹지 않는다.
+check("ff-only 로만 가져온다", "--ff-only" in inspect.getsource(si._workspace_land), True)
+check("클로드를 그 자리에서 돌린다", "cwd=work" in inspect.getsource(si.main), True)
 
 print()
 if FAIL:

@@ -6,9 +6,13 @@
   없어 죽을 것도 지킬 것도 없고, 파일 하나라 백업이 복사다. 대화가 맥미니
   밖으로 나가지 않고, 회선이 죽어도 기록은 계속된다.
 
-원본은 여전히 transcript.jsonl 이다. 이 DB 는 미러 + 검색면이다.
-  쓰기 실패는 조용히 무시한다(fail-open) — 기록 하나를 잃는 것보다
-  명령 처리가 멎는 쪽이 훨씬 나쁘다.
+**이 DB 가 정본이다** (사장님 지시 2026-08-16 "db를 정본으로 해").
+  2026-08-13 부터 transcript.jsonl 과 나란히 같은 것을 쌓아 왔는데, 두 곳에
+  같은 기록이 있으면 갈라지는 날 어느 쪽이 사실인지 판단할 근거가 없다.
+  지금은 읽는 쪽이 전부 이 DB 를 본다.
+
+  jsonl 은 구명정으로만 남긴다 — DB 쓰기가 실패한 건만 거기 적힌다.
+  평소에는 한 줄도 안 늘어난다. 그 파일에 줄이 생겼다면 DB 가 아팠다는 뜻이다.
 
 세 테이블:
   transcript — record() 가 남기는 문답 전부 (들림·명령·경로·답·비용)
@@ -40,7 +44,13 @@ CREATE TABLE IF NOT EXISTS transcript(
   command TEXT,
   reply TEXT,
   effective_input INTEGER,
-  cost_usd REAL
+  cost_usd REAL,
+  who TEXT,
+  output INTEGER,
+  danger TEXT,
+  confirmed INTEGER,
+  elevated INTEGER,
+  error TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_transcript_ts ON transcript(ts);
 CREATE TABLE IF NOT EXISTS results(
@@ -63,16 +73,24 @@ def _conn() -> sqlite3.Connection:
     # WAL: 데몬이 쓰는 동안 MCP 셸아웃이 읽는다 — 잠금 충돌을 없앤다.
     c.execute("PRAGMA journal_mode=WAL")
     c.executescript(_SCHEMA)
-    # who 열 (H2 다자간, 2026-08-13 추가) — 이미 만들어진 DB 에는
-    # CREATE TABLE IF NOT EXISTS 가 열을 못 붙이므로 여기서 이행한다.
+    # 뒤늦게 붙는 열들. CREATE TABLE IF NOT EXISTS 는 이미 만들어진 표에
+    # 열을 못 붙이므로 여기서 이행한다.
+    #   who                              H2 다자간 (2026-08-13)
+    #   output·danger·confirmed·elevated·error
+    #                                    jsonl 에만 있던 것 (2026-08-16,
+    #                                    정본을 DB 로 옮기며 흡수)
     cols = {r[1] for r in c.execute("PRAGMA table_info(transcript)")}
-    if "who" not in cols:
-        c.execute("ALTER TABLE transcript ADD COLUMN who TEXT")
+    for name, typ in (("who", "TEXT"), ("output", "INTEGER"),
+                      ("danger", "TEXT"), ("confirmed", "INTEGER"),
+                      ("elevated", "INTEGER"), ("error", "TEXT")):
+        if name not in cols:
+            c.execute(f"ALTER TABLE transcript ADD COLUMN {name} {typ}")
     return c
 
 
 _FIELDS = ("ts", "source", "route", "heard", "command", "reply",
-           "effective_input", "cost_usd", "who")
+           "effective_input", "cost_usd", "who", "output",
+           "danger", "confirmed", "elevated", "error")
 
 
 def save(fields: dict) -> bool:
@@ -101,6 +119,71 @@ def save_result(kind: str, query: str, content: str) -> bool:
         return True
     except Exception:
         return False
+
+
+# ── 읽기 ──────────────────────────────────────────────────
+# 읽는 쪽(기억·용어학습·자가정비·브리핑·채점·게이트키퍼·브릿지)은 전부
+# jsonl 을 한 줄씩 json.loads 해서 dict 를 만들던 코드였다. 그래서 여기서도
+# **같은 모양의 dict** 를 돌려준다 — 부르는 쪽은 파일 여는 두어 줄만 바뀐다.
+# 열 이름이 곧 옛 jsonl 의 키다. 하나 더 붙는 건 id 뿐이고, 그건 꼬리를
+# 이어 읽을 때 바이트 오프셋 대신 쓰는 자리표다.
+
+
+def _dicts(cur) -> list[dict]:
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def rows(since: str | None = None, limit: int | None = None,
+         newest_first: bool = False) -> list[dict]:
+    """문답 기록. since 는 ISO 문자열(그 시각 이후), limit 는 건수.
+
+    limit 를 주면 **최신 것부터** 세어 그만큼 가져오되, 돌려줄 때는 다시
+    옛날→최신 순으로 뒤집는다. 옛 코드가 `splitlines()[-500:]` 로 하던 것과
+    같은 뜻이고, 부르는 쪽의 순서 가정이 깨지지 않는다.
+    """
+    where, args = "", []
+    if since:
+        where = " WHERE ts >= ?"
+        args.append(since)
+    try:
+        with _conn() as c:
+            if limit is not None:
+                cur = c.execute(
+                    f"SELECT * FROM transcript{where} ORDER BY id DESC LIMIT ?",
+                    (*args, limit))
+                out = _dicts(cur)
+                out.reverse()
+            else:
+                cur = c.execute(
+                    f"SELECT * FROM transcript{where} ORDER BY id ASC", args)
+                out = _dicts(cur)
+    except Exception:
+        return []
+    if newest_first:
+        out.reverse()
+    return out
+
+
+def rows_after(last_id: int, limit: int = 2000) -> list[dict]:
+    """자리표 뒤로 새로 쌓인 것만. 기억(memory_local)이 꼬리를 따라올 때 쓴다."""
+    try:
+        with _conn() as c:
+            return _dicts(c.execute(
+                "SELECT * FROM transcript WHERE id > ? ORDER BY id ASC LIMIT ?",
+                (last_id, limit)))
+    except Exception:
+        return []
+
+
+def max_id() -> int:
+    """지금까지의 마지막 자리표. 처음 따라붙는 쪽이 '여기부터' 로 쓴다."""
+    try:
+        with _conn() as c:
+            return c.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM transcript").fetchone()[0]
+    except Exception:
+        return 0
 
 
 def recent_brief(n: int = 4, max_chars: int = 70) -> str:

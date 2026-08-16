@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import date, datetime
 from pathlib import Path
@@ -41,19 +42,82 @@ CALL_SPOKEN_MAX = 90
 
 _buf: list[tuple[datetime, str]] = []
 
+# 이 통화에 사장님 목소리가 한 번이라도 섞였는가.
+# 전화 모드는 '긴 발화 두 번 연속' 으로 자동 진입하므로 TV·라디오도 걸린다.
+# 2026-08-14 자동 정리 9건 중 3건이 방송·잡담이었고 ('그것이 알고싶다' 재연,
+# 재혼 이야기), 한 건마다 클로드 문서 정리가 한 번씩 돌았다.
+# 사장님이 전화기를 귀에 대고 통화하시면 마이크에 잡히는 건 사장님 목소리다 —
+# 진짜 통화면 여기가 True 가 되고, 방송이면 끝까지 False 다.
+_owner_heard = False
 
-def note(text: str) -> None:
-    """통화 중에 들린 말을 모아 둔다. 실패해도 조용히 넘어간다."""
+
+def note(text: str, owner: bool = False) -> None:
+    """통화 중에 들린 말을 모아 둔다. 실패해도 조용히 넘어간다.
+
+    owner — 이 발화가 등록 화자(사장님)로 확인됐는가. 기본값이 False 라
+    화자를 모르는 호출자는 예전과 똑같이 쓰면 된다. 다만 그때는 자동 정리가
+    안 걸린다 (owner_heard 참조).
+    """
     t = (text or "").strip()
     if not t:
         return
+    if owner:
+        global _owner_heard
+        _owner_heard = True
     _buf.append((datetime.now(), t))
     if len(_buf) > MAX_PARTS:
         del _buf[: len(_buf) - MAX_PARTS]
 
 
 def clear() -> None:
+    global _owner_heard
     _buf.clear()
+    _owner_heard = False
+
+
+def mark_owner(heard: bool) -> None:
+    """통화가 시작되는 시점에 답을 미리 안다면 그대로 박아 둔다.
+
+    "여보세요" 나 "전화 모드" 로 들어온 판은 그 말 자체가 등록 화자 확인을
+    통과한 것이라, 사장님이 전화를 받으신 게 이미 확실하다. 통화 내내
+    한 마디도 안 잡혀도 그건 통화가 맞다.
+
+    반대로 False 로 부르는 것도 뜻이 있다 — 조각이 MIN_PARTS 미만이면
+    정리 없이 버퍼가 남으므로, 새 통화가 앞 통화의 표시를 물려받지 않게
+    진입할 때마다 다시 놓는다.
+    """
+    global _owner_heard
+    _owner_heard = bool(heard)
+
+
+def owner_heard() -> bool:
+    """모아둔 것 중에 사장님 목소리가 있었나 — 자동 정리를 할지의 근거."""
+    return _owner_heard
+
+
+def drop(reason: str) -> Path | None:
+    """정리하지 않고 버린다. 단, 버린 원문은 state 에 남긴다.
+
+    ⚠ 그냥 지우면 안 된다. 방송으로 오판해 진짜 통화를 버렸을 때 확인할
+      길이 있어야 하고, 문턱을 조정하려면 버린 것들의 실물이 필요하다
+      (거르개를 만든 첫날 점수 기록을 빼먹어 근거가 통째로 사라진 전례).
+      위키가 아니라 state 라 클로드도 안 돌고 위키도 안 더러워진다.
+    """
+    path = None
+    if _buf:
+        try:
+            import json
+
+            path = config.STATE / "call_dropped.jsonl"
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(
+                    {"ts": _buf[0][0].isoformat(timespec="seconds"),
+                     "reason": reason, "parts": len(_buf),
+                     "lines": [t for _, t in _buf]}, ensure_ascii=False) + "\n")
+        except (OSError, ValueError):
+            path = None
+    clear()
+    return path
 
 
 def pending() -> int:
@@ -71,12 +135,25 @@ def _summarize(lines: list[str]) -> str:
         return ""
 
 
+# 일정 절을 기계가 다시 읽을 수 있게 꼴을 정해 준다. 사람이 읽기에도
+# 어색하지 않은 선에서, 때가 분명한 것만 앞에 때를 적게 한다.
+#
+# ⚠ 지어내지 말라는 말을 여기서 한 번 더 한다. 캘린더는 되돌리기 번거로운
+#   자리다 — 2026-08-15 에 받아쓰기로 생긴 쓰레기 일정 56건을 지웠다.
+#   때가 흐릿하면 때를 비우고 적게 하는 편이, 그럴듯한 시각을 지어내는
+#   것보다 훨씬 낫다. 비어 있으면 후보로 세지 않고 노트에만 남는다.
+_WHEN_RULE = (
+    "'다음 일정·약속' 절은 한 줄에 하나씩, 때가 분명한 것만 "
+    "`- [때] 무엇` 꼴로 적어라 (예: `- [내일 오후 3시] 세종 축산환경관리원 미팅`). "
+    "때가 흐릿하면 대괄호 없이 그냥 적어라 — 지어내지 마라.\n")
+
 _MEETING_SHAPE = (
     "다음은 회의 자리에서 받아쓴 내용이다. 받아쓰기라 오인식이 섞여 "
     "있다 — 문맥으로 바로잡되 확신 없는 고유명사는 그대로 두라.\n"
     "회의록으로 정리하라. 마크다운, 아래 절 구성 그대로:\n"
     "## 핵심 논의 (불릿 3~6)\n## 결정된 것\n## 해야 할 일 "
     "(맡을 사람이 언급됐으면 함께)\n## 다음 일정·약속\n"
+    + _WHEN_RULE +
     "들린 것만 쓰고 지어내지 마라. 없는 절은 '(없음)' 으로.\n\n")
 
 # GPT 모드는 회의가 아니다 — 한 사람이 AI 와 주고받은 대화다. '결정된 것'
@@ -99,6 +176,8 @@ _CALL_SHAPE = (
     "문맥으로 바로잡되 확신 없는 고유명사는 그대로 두라.\n"
     "맨 첫 줄에 통화 전체를 한 문장(60자 이내)으로 요약하라. 그 아래에\n"
     "## 오간 내용 (불릿 2~4)\n## 해야 할 일 (없으면 '(없음)')\n"
+    "## 다음 일정·약속 (없으면 '(없음)')\n"
+    + _WHEN_RULE +
     "들린 것만 쓰고 지어내지 마라.\n\n")
 
 
@@ -189,7 +268,19 @@ def save() -> tuple[str, Path | None]:
                               f"{summary or '(요약 없음)'}\n\n📓 {path.name}\n🔗 {link}")
     except Exception:
         pass                            # 링크 못 보내도 위키에는 남았다
-    return said, path
+    return said + _offer_events(summary, "통화"), path
+
+
+def _offer_events(summary: str, source: str) -> str:
+    """때가 분명한 일정이 있으면 적어 두고 여쭙는 말을 덧붙인다.
+
+    넣지는 않는다 — 승인은 사장님 몫이다. 이유는 위 _PENDING 주석에 있다.
+    """
+    events = extract_events(summary)
+    if not events:
+        return ""
+    stash_events(events, source)
+    return " " + ask_line(events)
 
 
 def _one_line(summary: str) -> str:
@@ -260,7 +351,103 @@ def save_meeting(kind: str = "미팅") -> tuple[str, Path | None]:
         # 소리로는 핵심만 — 전문은 위키·텔레그램으로 본다.
         head = summary.replace("#", " ").replace("\n", " ").strip()
         said += " " + head[:160]
-    return said, path
+    return said + _offer_events(summary, kind), path
+
+
+# ─────────────────────────────────────────────────────────
+# 일정 후보 — 뽑아서 여쭙고, 승인하시면 그때 넣는다
+# ─────────────────────────────────────────────────────────
+# 사장님 지시 2026-08-16: "일정이 생기면 바로 등록해주는 기능".
+#
+# ⚠ 바로 넣지 않는다. 2026-08-14 에 메일에서 뽑은 일정 자동 등록을 사장님이
+#   직접 끄셨고("메일만 보고 뽑은 일정은 정확하지 않다"), 8/15 에는 받아쓰기가
+#   일정이 되어 생긴 쓰레기 56건을 지웠다. 통화 받아쓰기 품질은 메일보다
+#   나쁘다 — 같은 노트 안에서도 이름이 '충무화(?)' 처럼 흔들린다.
+#   그래서 뽑기까지만 하고, 넣는 건 사장님 한마디를 받는다.
+_PENDING = config.STATE / "pending_events.json"
+# 여쭙고 이만큼 지나면 후보를 버린다. 한참 뒤의 "응" 이 엉뚱한 걸 넣으면 안 된다.
+PENDING_TTL_SEC = 30 * 60
+
+_WHEN_LINE = re.compile(r"^\s*[-*]\s*\[([^\]]{2,40})\]\s*(.+?)\s*$")
+
+
+def extract_events(summary: str) -> list[dict]:
+    """정리본의 '다음 일정·약속' 절에서 때가 분명한 것만 뽑는다.
+
+    `- [내일 오후 3시] 세종 축산환경관리원 미팅` 꼴만 후보로 본다. 대괄호가
+    없으면 때가 흐릿하다는 뜻이라 노트에만 남기고 지나간다 — 캘린더에
+    '언젠가' 를 넣을 수는 없다.
+    """
+    import korean_time as kt
+
+    out: list[dict] = []
+    in_sec = False
+    for line in (summary or "").splitlines():
+        if line.startswith("## "):
+            in_sec = "일정" in line or "약속" in line
+            continue
+        if not in_sec:
+            continue
+        m = _WHEN_LINE.match(line)
+        if not m:
+            continue
+        when_txt, title = m.group(1).strip(), m.group(2).strip()
+        title = title.rstrip(" .").strip()
+        if len(title) < 2 or len(title) > 40:
+            continue
+        dt = kt.parse_datetime(when_txt)
+        if dt is None or dt < datetime.now():
+            continue                     # 때를 못 읽었거나 지난 일정
+        out.append({"title": title, "when": dt.isoformat(timespec="minutes"),
+                    "hours": kt.parse_duration_hours(when_txt)})
+    return out
+
+
+def stash_events(events: list[dict], source: str) -> None:
+    """여쭙기 전에 후보를 적어 둔다. 승인이 오면 이 자리에서 꺼내 넣는다."""
+    try:
+        _PENDING.write_text(json.dumps(
+            {"at": datetime.now().isoformat(timespec="seconds"),
+             "source": source, "events": events}, ensure_ascii=False))
+    except OSError:
+        pass
+
+
+def take_events() -> tuple[list[dict], str]:
+    """보관해 둔 후보를 꺼내고 지운다. 시간이 지났으면 빈손."""
+    try:
+        d = json.loads(_PENDING.read_text())
+    except (OSError, ValueError):
+        return [], ""
+    try:
+        _PENDING.unlink()
+    except OSError:
+        pass
+    try:
+        at = datetime.fromisoformat(d.get("at", ""))
+    except ValueError:
+        return [], ""
+    if (datetime.now() - at).total_seconds() > PENDING_TTL_SEC:
+        return [], ""
+    return list(d.get("events") or []), str(d.get("source") or "")
+
+
+def has_pending() -> bool:
+    """여쭤 놓고 답을 기다리는 후보가 있는가."""
+    return _PENDING.exists()
+
+
+def ask_line(events: list[dict]) -> str:
+    """여쭙는 말. 몇 건인지와 첫 건을 말하고, 나머지는 수로만 알린다."""
+    if not events:
+        return ""
+    import speak
+
+    first = events[0]
+    when = datetime.fromisoformat(first["when"])
+    head = f"{when.month}월 {when.day}일 " + speak.clock_words(when.hour, when.minute)
+    tail = f", 외 {len(events) - 1}건" if len(events) > 1 else ""
+    return f"일정 후보가 있어요. {head} {first['title']}{tail}. 등록할까요?"
 
 
 # 말로 부르는 주문. "전화 끝났어" 말고도 여러 갈래로 말씀하신다.

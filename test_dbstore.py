@@ -4,6 +4,10 @@
 ⚠ 실사용 DB(state/dongbaek.db)를 건드리면 안 된다 — DB_PATH 를 임시로
   바꿔 시험한다. record() 의 테스트 오염 가드와 같은 원칙.
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import tempfile
 from pathlib import Path
 

@@ -4,6 +4,10 @@
 사장님 지시(2026-08-13): "원거리에 계셔서 출력을 높여 듣습니다 — 라고
 니가 인지하고 있는지 확인할 수 있게 해줘."
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import config
 import dongbaek
 import router

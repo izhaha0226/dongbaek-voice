@@ -77,7 +77,7 @@ def _is_noise(word: str, right: str) -> str | None:
     if right in word:
         return f"'{right}' 를 이미 제대로 들었다"
     # ② 이름의 앞토막인데 너무 짧으면 그냥 그 말일 수 있다.
-    #    '에임' 두 글자를 '한빛기획' 으로 바꾸는 건 넘겨짚는 것이다.
+    #    '한빛' 두 글자를 '한빛기획' 으로 바꾸는 건 넘겨짚는 것이다.
     if word in right and len(word) <= 2:
         return "너무 짧은 앞토막"
     return None
@@ -85,23 +85,14 @@ def _is_noise(word: str, right: str) -> str | None:
 
 def _heard_lines(days: int) -> list[str]:
     """최근 며칠치 받아쓰기 원문. 큰 파일이므로 한 줄씩 흘려 읽는다."""
+    import dbstore
+
     since = datetime.now() - timedelta(days=days)
     out: list[str] = []
-    try:
-        with open(config.TRANSCRIPT_LOG, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    row = json.loads(line)
-                except Exception:
-                    continue
-                ts = row.get("ts", "")
-                if ts and ts < since.isoformat():
-                    continue
-                heard = row.get("heard") or ""
-                if heard:
-                    out.append(heard)
-    except FileNotFoundError:
-        return []
+    for row in dbstore.rows(since=since.isoformat()):
+        heard = row.get("heard") or ""
+        if heard:
+            out.append(heard)
     return out
 
 

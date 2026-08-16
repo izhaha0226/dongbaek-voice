@@ -4,6 +4,10 @@
 모델 없이 돈다. 임베딩을 수학적으로 조작해 문턱·격차(margin) 규칙만 본다.
     python test_voiceprint.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import sys
 
 import numpy as np
@@ -117,7 +121,9 @@ stranger = utt(0.30, 0.30, pad=4)   # 둘 다와 어중간하게 닮은 낯선 �
 check("확실한 거절(0.30)은 담는다",
       voiceprint.remember_stranger(stranger, 0.30), True)
 check("남 지문 1개", voiceprint.strangers(), 1)
-check("남 지문은 화자로 세지 않는다", sorted(voiceprint.enrolled()), ["김철수", "홍길동"])
+# ⚠ 차례를 따지지 않는다 — 공개판으로 옮길 때 이름이 바뀌면 가나다
+#   차례도 같이 바뀐다. 여기서 볼 것은 "둘 다 있고 남은 안 섞였나" 다.
+check("남 지문은 화자로 세지 않는다", set(voiceprint.enrolled()), {"홍길동", "김철수"})
 
 # 상대 판정: 나와 닮은 정도가 남과 닮은 정도보다 확실히 커야 통과
 check("남과 비슷한 수준이면 거절", voiceprint.verify(stranger)[0], None)
@@ -140,8 +146,58 @@ check("오인의 원인이던 남 지문은 지운다",
       voiceprint.strangers() <= 1, True)
 check("정정 뒤에는 통과한다", voiceprint.verify(mine)[0], "홍길동")
 
+print("\n[7] 학습 지문이 넘칠 때 — 오래된 것이 아니라 겹치는 것을 버린다")
+# ⚠ 오래된 것부터 버리면 기억이 '최근 몇 시간' 이 된다. 실측 2026-08-16:
+#   학습 대상이 하루 67건인데 상한이 10개라 최근 3.5시간치만 남았다.
+#   아침·먼 거리·감기 목소리가 그날 오후 잡담에 밀려 사라지고, 그러면
+#   같은 조건에서 매번 다시 거절당한다(문턱 근처 거절 39→85건).
+import numpy as _np  # noqa: E402
+
+_rng = _np.random.default_rng(0)
+
+
+def _unit(x):
+    return x / _np.linalg.norm(x, axis=-1, keepdims=True)
+
+
+# 조건 세 무리(멀리·가까이·감기) × 4개. 무리 안은 닮고 무리끼리는 다르다.
+_cores = _unit(_rng.normal(size=(3, 192)))
+_stack = _unit(_np.vstack([c + 0.15 * _rng.normal(size=(4, 192)) for c in _cores]))
+_kept = voiceprint._thin(_stack, 3)
+check("상한을 지킨다", len(_kept), 3)
+check("세 조건이 하나씩 남는다",
+      len({int(_np.argmax(_cores @ k)) for k in _kept}), 3)
+# 같은 자리에서 '최근 3개' 를 쓰면 한 무리만 남는다 — 그게 옛 방식이었다.
+check("옛 방식(최근 N개)이었다면 한 조건만 남았을 것",
+      len({int(_np.argmax(_cores @ k)) for k in _stack[-3:]}), 1)
+check("상한 아래면 아무것도 안 버린다", len(voiceprint._thin(_stack[:2], 40)), 2)
+check("상한이 넉넉해졌다", getattr(config, "VOICE_ADAPT_MAX", 10) >= 40, True)
+
+print("\n[8] 등록 지문은 영구 보관 (사장님 지시 2026-08-16)")
+# 등록 지문에는 상한이 없다 — 솎아내는 건 학습(#적응)과 남(#남) 지문뿐이다.
+# 그리고 '안 지워진다' 와 '영구히 남는다' 는 다르다. 파일은 state/ 아래 한
+# 장뿐이고 거기는 gitignore 다. 2026-08-13 에 같은 자리의 dongbaek.db 가
+# 자가개선 롤백의 git clean 에 쓸려간 전례가 있다.
+_before = voiceprint.enrolled()
+for _ in range(60):                       # 상한(40)보다 훨씬 많이 넣어 본다
+    voiceprint.enroll_sample("홍길동", utt(0.90, 0.0, pad=2))
+_after = voiceprint.enrolled()["홍길동"]
+check("등록 지문은 넣는 대로 다 남는다", _after >= _before.get("홍길동", 0) + 60, True)
+check("학습 지문만 상한을 받는다",
+      voiceprint.learned().get("홍길동", 0) <= getattr(config, "VOICE_ADAPT_MAX", 40), True)
+
+_bk = Path(config.STATE) / "voiceprints-enrolled"
+check("백업이 만들어진다", (_bk / "latest.npz").exists(), True)
+# allow_pickle 은 쓰지 않는다 — 지문은 순수 float 배열이라 필요가 없고,
+# 켜 두면 npz 한 장이 임의 코드 실행 통로가 된다.
+_saved = np.load(_bk / "latest.npz")
+check("백업에 등록 지문이 들어 있다", "홍길동" in _saved.files, True)
+check("백업에 학습 지문은 안 담는다",
+      any(k.endswith("#적응") for k in _saved.files), False)
+check("백업에 남 지문도 안 담는다", any(k == "#남" for k in _saved.files), False)
+
 print()
 if FAIL:
     print(f"❌ 실패 {len(FAIL)}건")
     sys.exit(1)
-print("✅ 전부 통과 — 문턱과 격차가 남의 목소리를 막는다")
+print("✅ 전부 통과 — 등록한 목소리는 영구히 남고, 남의 목소리는 문턱이 막는다")

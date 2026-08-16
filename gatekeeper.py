@@ -47,7 +47,16 @@ def _generate(prompt: str, *, timeout: float, num_predict: int,
     decoding). 프롬프트로 "한 단어만" 을 부탁하는 건 소용없었다 — 소형
     모델은 영어로 풀이를 늘어놓다 토큰이 끝난다. 형식은 부탁하는 게 아니라
     강제하는 것이다.
+
+    ⚠ OLLAMA_ENABLED=False 면 여기서 바로 막는다 (2026-08-14 사장님 지시:
+      "올라마가 아예 관여를 안 하게 하자"). 이 함수가 ollama 로 나가는
+      **유일한 문**이라 여기 한 곳만 막으면 게이트키퍼·브리핑 요약·
+      일정 파싱·뉴스 번역이 모두 조용히 폴백으로 내려간다.
+      부르는 쪽은 전부 예외를 잡아 폴백을 갖고 있으므로 예외로 알린다 —
+      빈 문자열을 돌려주면 '모델이 그렇게 답했다' 와 구분이 안 된다.
     """
+    if not getattr(config, "OLLAMA_ENABLED", True):
+        raise RuntimeError("ollama 사용 안 함 (config.OLLAMA_ENABLED=False)")
     payload = {
         "model": config.GATEKEEPER_MODEL,
         "prompt": prompt,
@@ -74,21 +83,14 @@ def _recent_context(max_pairs: int = 4) -> str:
     """최근 주고받은 말 — transcript 꼬리에서 읽는다.
 
     "아까 그거" 같은 참조를 로컬에서 풀기 위한 최소 문맥.
-    파일이 커져도 꼬리 8KB 만 읽는다.
+    기록이 아무리 쌓여도 마지막 몇 건만 본다 — 옛날엔 파일 꼬리 8KB 를
+    읽었고, 지금은 DB 에서 최신 40건을 가져온다(같은 뜻, 자르는 자리가
+    '바이트' 에서 '건' 으로 바뀐 것뿐이다).
     """
-    try:
-        with config.TRANSCRIPT_LOG.open("rb") as f:
-            f.seek(0, 2)
-            f.seek(max(0, f.tell() - 8192))
-            tail = f.read().decode("utf-8", "ignore").splitlines()
-    except OSError:
-        return ""
+    import dbstore
+
     pairs: list[str] = []
-    for line in reversed(tail):
-        try:
-            r = json.loads(line)
-        except ValueError:
-            continue
+    for r in dbstore.rows(limit=40, newest_first=True):
         if r.get("command") and r.get("reply"):
             pairs.append(f"사장님: {r['command'][:80]}\n동백: {r['reply'][:80]}")
         if len(pairs) >= max_pairs:
@@ -311,7 +313,7 @@ def try_chat(command: str) -> str | None:
 # ─────────────────────────────────────────────────────────
 # 왜 필요한가. 규칙(정규식+낱말표)으로 자연어를 잡으면 계속 깨진다.
 # 2026-08-12 하루에만 '변경' 두 글자 때문에 세 곳을 고쳤다 —
-# "법무사 대표 변경의 건" 은 서류 이름인데 옮기기 명령으로 읽혔다.
+# "대표자 변경의 건" 은 서류 이름인데 옮기기 명령으로 읽혔다.
 # 어순·동사꼴·날짜 생략도 각각 따로 패치해야 했다. 새 표현마다 또 깨진다.
 #
 # ⚠ 그런데 시각은 절대 맡기지 않는다.
@@ -343,8 +345,8 @@ _SCHED_PROMPT = """일정 명령을 읽는다. 의도와 제목만 뽑는다. �
 제목: 그 일정을 부르는 이름. 날짜·시각·"등록해줘" 같은 말은 빼고 알맹이만.
 
 보기)
-"오늘 일정에 법무사 대표 변경의 건으로 서류 전달 11시 등록해줘"
-  의도=등록, 제목=법무사 대표 변경의 건 서류 전달
+"오늘 일정에 대표자 변경의 건으로 서류 전달 11시 등록해줘"
+  의도=등록, 제목=대표자 변경의 건 서류 전달
   ('대표 변경의 건' 은 서류 이름이지 옮기라는 말이 아니다)
 "본사 미팅 11시로 옮겨줘"  → 의도=수정, 제목=본사 미팅
 "내일 치과 예약 취소해"      → 의도=삭제, 제목=치과 예약

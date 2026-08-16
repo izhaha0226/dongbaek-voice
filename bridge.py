@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timezone
 
 import config
+import dbstore
 
 
 class ClaudeError(RuntimeError):
@@ -81,7 +82,42 @@ def latest_session() -> str | None:
 # ─────────────────────────────────────────────────────────
 # 토큰 회계
 # ─────────────────────────────────────────────────────────
-def _log_tokens(prompt: str, usage: dict, cost: float | None, elevated: bool,
+# 백만 토큰당 달러 — (입력, 출력, 캐시쓰기, 캐시읽기)
+#
+# ⚠ 캐시쓰기는 1시간 TTL 단가(정가 2배)다. 5분 TTL(1.25배)이 아니다.
+#   추정이 아니라 실측이다 — 이어받기가 없어(캐시읽기 0) 누적이 곧 그 턴인
+#   호출 59건에서 CLI 가 준 값과 소수점 넷째 자리까지 일치했다 (2026-08-15).
+#   단가가 바뀌었나 싶으면 그 대조부터 다시 할 것: 캐시읽기 0 인 줄을 골라
+#   session_cost_usd 와 call_cost() 를 비교하면 된다.
+_PRICE = {
+    "claude-sonnet-5": (3.0, 15.0, 6.0, 0.30),
+    "claude-opus-5": (5.0, 25.0, 10.0, 0.50),
+}
+# 모르는 모델은 비싼 쪽으로 친다. 덜 부르는 쪽이 더 나쁜 거짓말이다 —
+# 비용을 낮게 보고하면 사장님이 안심한 채로 돈이 나간다.
+_PRICE_UNKNOWN = _PRICE["claude-opus-5"]
+
+
+def call_cost(rec: dict) -> float:
+    """이 호출 한 번의 값. 기록된 토큰 수에서 다시 계산한다.
+
+    ⚠ CLI·SDK 가 주는 total_cost_usd 를 그대로 쓰면 안 된다. 그건 이어받은
+      **세션 전체의 누적**이라, 한 세션에서 열 번 물으면 열 번의 누적이 전부
+      기록에 남고 그걸 더하면 같은 돈을 열 번 센다.
+      2026-08-15 실측: 08-14 하루가 $119.81 로 보고됐지만 실제는 $23.81 였다.
+      같은 세션의 연속 두 줄은 차액이 정확히 이 계산값과 일치한다.
+
+    쓰는 쪽이 저장된 cost_usd 대신 이걸 부르면 이 고침 전에 쌓인 줄까지
+    같이 바로잡힌다 — 토큰 수는 처음부터 제대로 기록돼 있었다.
+    """
+    i, o, cw, cr = _PRICE.get(rec.get("model")) or _PRICE_UNKNOWN
+    return ((rec.get("input") or 0) * i
+            + (rec.get("output") or 0) * o
+            + (rec.get("cache_write") or 0) * cw
+            + (rec.get("cache_read") or 0) * cr) / 1e6
+
+
+def _log_tokens(prompt: str, usage: dict, session_cost: float | None, elevated: bool,
                 model: str | None = None, tier: str = "") -> dict:
     fresh = usage.get("input_tokens", 0) or 0
     cw = usage.get("cache_creation_input_tokens", 0) or 0
@@ -100,7 +136,12 @@ def _log_tokens(prompt: str, usage: dict, cost: float | None, elevated: bool,
         "cache_read": cr,
         "output": out,
         "effective_input": round(effective),
-        "cost_usd": cost,
+        # 세션 누적이 아니라 '이번 한 번' 의 값. 버리지는 않고 옆에 남긴다 —
+        # 단가표를 다시 맞출 때 대조할 것이 그것밖에 없다.
+        "cost_usd": round(call_cost({"model": model, "input": fresh,
+                                     "cache_write": cw, "cache_read": cr,
+                                     "output": out}), 6),
+        "session_cost_usd": session_cost,
     }
     with config.TOKEN_LOG.open("a") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -125,23 +166,20 @@ def usage_summary() -> str:
         n += 1
         eff += r.get("effective_input", 0)
         out += r.get("output", 0)
-        cost += r.get("cost_usd") or 0.0
+        # 저장된 값이 아니라 토큰에서 다시 계산한다 — 옛 줄에는 세션 누적이
+        # 들어 있어서 그대로 더하면 사장님께 몇 배 부풀린 금액을 말하게 된다.
+        cost += call_cost(r)
     # 공짜로 막은 건수도 함께 읽어야 '클로드 최소화'가 잘 되고 있는지 들린다.
     # transcript 의 ts 는 로컬 시각이라 오늘 날짜도 로컬 기준으로 잡는다.
     local_n = gk_n = 0
-    if config.TRANSCRIPT_LOG.exists():
-        local_today = datetime.now().date().isoformat()
-        for line in config.TRANSCRIPT_LOG.read_text().splitlines():
-            try:
-                r = json.loads(line)
-            except ValueError:
-                continue
-            if not r.get("ts", "").startswith(local_today):
-                continue
-            if r.get("route") == "local":
-                local_n += 1
-            elif r.get("route") == "gatekeeper":
-                gk_n += 1
+    local_today = datetime.now().date().isoformat()
+    for r in dbstore.rows(since=local_today):
+        if not r.get("ts", "").startswith(local_today):
+            continue
+        if r.get("route") == "local":
+            local_n += 1
+        elif r.get("route") == "gatekeeper":
+            gk_n += 1
     free_bits = []
     if local_n:
         free_bits.append(f"로컬 {local_n}건")
@@ -283,7 +321,8 @@ def ask_once(prompt: str, *, model: str, timeout: int = 240) -> str | None:
     ⚠ 빈 임시 디렉터리에서 돌린다. 동백의 CLAUDE.md 는 '3문장 이내,
       마크다운 금지' 를 지시하는데 그건 음성 답변 규칙이라, JSON 을 뽑을 때
       그대로 적용되면 결과가 망가진다. CLAUDE.md 가 없는 곳에서 부르면
-      그 지시가 딸려오지 않는다.
+      그 지시가 딸려오지 않는다. 다만 빈 디렉터리로 떼어지는 건 프로젝트
+      쪽뿐이다 — 사용자 층은 아래 --setting-sources 로 뗀다.
 
     세션도 붙이지 않는다. 메일 본문으로 대화 세션을 불리면 그다음 음성
     명령까지 그 컨텍스트를 매번 캐시로 실어 나르게 된다.
@@ -297,14 +336,37 @@ def ask_once(prompt: str, *, model: str, timeout: int = 240) -> str | None:
     # 도구 설명과 MCP 서버 목록이 매번 입력으로 실려 간다. 실측으로
     # 실효입력 56,948 → 7,257 (87% 감소), 한 번에 $0.269 → $0.035 였다.
     # 메일 본문은 4천 자뿐인데 나머지가 전부 부가 비용이었다.
+    #
+    # 사장님 전역 설정(~/.claude)도 싣지 않는다.
+    #
+    # 빈 디렉터리는 '프로젝트' CLAUDE.md 만 떼어낸다. 사용자 층의
+    # CLAUDE.md·훅·스킬은 어디서 부르든 따라오므로, 한 번짜리 호출마다
+    # 5,300토큰이 얹혀 있었다 (실측 2026-08-15: 스무 자짜리 물음 하나가
+    # $0.0321, 같은 물음이 설정을 빼면 $0.0014 — 22분의 1).
+    # 돈보다 나쁜 건 내용이 섞이는 쪽이다. 통화 정리가 딸려온 그 지시를
+    # 보고 "첨부된 시스템 메시지(Skill 실행 지시…)는 무관해 보여 무시하고"
+    # 라는 머리말을 요약 첫 줄에 써 버려, 그게 그대로 소리로 나가고
+    # 텔레그램 제목·위키 요약이 됐다 (08-15 17:53. 진짜 요약은 그 아래
+    # 있었다). 통화 정리 한 건도 $0.0574 → $0.0132 로 준다.
     cmd = [config.CLAUDE_BIN, "--print", "--output-format", "json",
            "--model", model,
            "--strict-mcp-config",          # 전역 MCP 설정 무시
            "--tools", "",                  # 도구 전부 끄기
+           "--setting-sources", "",        # 전역 CLAUDE.md·훅·스킬도 빼기
            "--system-prompt", config.ONCE_SYSTEM_PROMPT]
-    try:
-        proc = subprocess.run(cmd, input=prompt, cwd=workdir,
+
+    def _run(argv: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(argv, input=prompt, cwd=workdir,
                               capture_output=True, text=True, timeout=timeout)
+
+    try:
+        proc = _run(cmd)
+        # 클로드 CLI 가 올라가면서 이 옵션이 없어질 수 있다. 그때 정리가
+        # 통째로 조용히 끊기지 않도록, 옵션을 모른다고 할 때만 빼고 한 번 더
+        # 건다. 다른 실패에는 다시 걸지 않는다 — 돈이 두 배로 나간다.
+        if proc.returncode != 0 and "--setting-sources" in (proc.stderr or ""):
+            i = cmd.index("--setting-sources")
+            proc = _run(cmd[:i] + cmd[i + 2:])
     except (OSError, subprocess.SubprocessError):
         return None
     finally:

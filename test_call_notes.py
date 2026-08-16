@@ -10,6 +10,10 @@
 
     python test_call_notes.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import call_notes
 import router
 
@@ -74,7 +78,9 @@ check("버퍼는 비운다", call_notes.pending(), 0)
 
 print("\n데몬에 연결돼 있는가")
 src = open("dongbaek.py").read()
-check("통화 중에 모은다", "call_notes.note(text)" in src, True)
+check("통화 중에 모은다", "call_notes.note(text, owner=mine)" in src, True)
+# 방송을 통화로 오인해 위키에 남기던 것을 여기서 끊는다 (2026-08-14).
+check("누가 말했는지도 함께 적는다", "call_notes.owner_heard()" in src, True)
 check("'전화 끝났어' 를 로컬에서 처리한다", "call_notes.is_end_call" in src, True)
 # 2026-08-13 무음 통일 이후 해제는 _phone_exit 가 담당한다 (봉인 해제 포함).
 check("정리 뒤 전화 모드를 푼다",
@@ -93,6 +99,17 @@ for s in ("그만", "그만해", "이제 그만하라고", "됐어", "멈춰", "
 for s in ("그만큼 좋았어", "그 일은 그만두고 다른 걸 하자", "오늘 일정 알려줘",
           "너한테 그거 다 읽어 달라는 거 아니고 그냥 저장만 하고 요약 정리해 두라고"):
     check(f"정지 아니다: {s[:20]!r}", _router.is_stop_speaking(s), False)
+# ⚠ '됐어' 는 무엇이 '되었다' 는 말의 끝이기도 하다. 절 안 아무 데나 있는
+#   걸로 잡으면 상태를 묻는 말이 중단 명령이 된다.
+#   실사례 2026-08-16 09:27 — "어떤 게 수정됐어?"(공백 빼면 7자)가 정지로
+#   읽혀 대화창이 닫혔고, 이어서 하신 "둘다 반영이 뭐 뭔데."가 호출어 없는
+#   말이 되어 통째로 무시됐다. "대화가 두 마디를 못 넘어간다" 가 이것이었다.
+for s in ("어떤 게 수정됐어?", "반영됐어?", "저장됐어?", "등록됐어?", "배포됐어?",
+          "정리됐어", "둘다 반영이 뭐 뭔데."):
+    check(f"완료형은 정지 아니다: {s[:20]!r}", _router.is_stop_speaking(s), False)
+# 멈추라는 뜻의 '됐어' 는 홀로 서거나 짧은 앞말만 데리고 온다.
+for s in ("됐어", "이제 됐어", "다 됐어", "응 됐어"):
+    check(f"정지다: {s[:20]!r}", _router.is_stop_speaking(s), True)
 
 print("\n[통화 정리는 소리로 짧게, 전문은 링크로]")
 # 사장님 지시: "다 읽으라는 게 아니고 … share note url 로 보내주고

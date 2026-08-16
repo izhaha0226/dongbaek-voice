@@ -13,6 +13,10 @@
   ④ 밀리면 거절하고 알린다 (무한정 쌓이면 한참 뒤에 엉뚱하게 실행된다)
     python test_concurrency.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import threading
 import time
 

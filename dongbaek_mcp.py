@@ -81,5 +81,10 @@ def logs(query: str = "", lines: int = 40) -> str:
     return _run("logs", query=query, lines=lines)
 
 
+@server.tool(description="특정 발신·제목의 메일이 오면 30분 이내로 알려주는 감시를 등록한다 (예: '강남 한빛건설에서 메일 오면 알려줘'). keyword=찾을 이름, note=알림 문구(선택, 비우면 keyword 그대로).")
+def mail_watch_add(keyword: str, note: str = "") -> str:
+    return _run("mail_watch_add", keyword=keyword, note=note)
+
+
 if __name__ == "__main__":
     server.run()

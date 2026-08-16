@@ -11,6 +11,10 @@
 동백은 영구히 귀를 잃는데, 소리 없이 죽는 고장이라 눈치채기 어렵다.
     python test_barge_in.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import queue
 import time
 

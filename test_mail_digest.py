@@ -10,6 +10,10 @@
   ④ 시험 실행 — --dry-run 이 기록을 남기면 안 된다 (진짜 실행이 건너뛴다)
     python test_mail_digest.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import json
 from datetime import datetime, timedelta
 

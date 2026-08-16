@@ -87,17 +87,31 @@ _WS = re.compile(r"\s+")
 # TTS 가 "별표", "슬래시", "이퀄" 처럼 읽어버리거나 발음이 끊긴다.
 # 한글·영문·숫자와 문장부호(. , ? !)만 남긴다.
 _SYMBOLS = re.compile(r"[^\w\s가-힣.,?!%]", re.UNICODE)
+
+# 소리로 나가는 말은 한국어다 (CLAUDE.md). 그런데 클로드가 영어로 답을
+# 흘리면 그게 그대로 재생된다 — 2026-08-14 09:24 에 581자짜리 영어 작업
+# 메모가, 2026-08-15 09:29 에 "This clearly isn't directed at me…" 가
+# 그렇게 나갔다. 프롬프트로만 막아 왔는데 두 번 다 뚫렸다.
+_HANGUL = re.compile(r"[가-힣]")
+_LATIN = re.compile(r"[A-Za-z]")
+# 한글이 한 글자도 없고 알파벳이 이만큼 넘으면 영어 '문장' 이다.
+# 낱말 하나(RFP·AI·PDF·파일명)는 한국어 문장 안에 섞여 오므로 안 걸린다.
+_FOREIGN_MIN_LETTERS = 20
+_FOREIGN_SENT = re.compile(r"(?<=[.!?。])\s+|\n+")
 _REPEAT_PUNCT = re.compile(r"([.,?!])\1+")
 
 # 단위는 한글로 풀어 읽는다. "32GB" 를 TTS 가 "삼십이지비" 라고 읽으면
 # 귀로는 알아들을 수 없다 — 사장님 교정: "32GB 가 아니라 32기가바이트".
 # 숫자 뒤에 붙은 것만 바꾼다. 문장 속 영어 낱말까지 건드리지 않기 위해서다.
+# ⚠ 끝 경계는 \b 가 아니라 '뒤에 알파벳이 없다' 로 본다. 위 시각과 같은
+#   이유다 — "32GB를" 은 'B' 와 '를' 이 둘 다 낱말 문자라 \b 가 안 서서
+#   통째로 안 바뀌었고, 그대로 "삼십이지비를" 로 나갔다.
 _UNITS = [
-    (re.compile(r"(?<=\d)\s*TB\b", re.I), "테라바이트"),
-    (re.compile(r"(?<=\d)\s*GB\b", re.I), "기가바이트"),
-    (re.compile(r"(?<=\d)\s*MB\b", re.I), "메가바이트"),
-    (re.compile(r"(?<=\d)\s*KB\b", re.I), "킬로바이트"),
-    (re.compile(r"(?<=\d)\s*ms\b"), "밀리초"),
+    (re.compile(r"(?<=\d)\s*TB(?![A-Za-z])", re.I), "테라바이트"),
+    (re.compile(r"(?<=\d)\s*GB(?![A-Za-z])", re.I), "기가바이트"),
+    (re.compile(r"(?<=\d)\s*MB(?![A-Za-z])", re.I), "메가바이트"),
+    (re.compile(r"(?<=\d)\s*KB(?![A-Za-z])", re.I), "킬로바이트"),
+    (re.compile(r"(?<=\d)\s*ms(?![A-Za-z])"), "밀리초"),
     # 줄여 말한 "48기가" 도 끝까지 읽는다. '기가 막히다' 같은 말과 섞이지
     # 않도록 숫자 바로 뒤일 때만.
     (re.compile(r"(?<=\d)\s*기가(?!바이트)"), "기가바이트"),
@@ -105,35 +119,112 @@ _UNITS = [
 ]
 
 # 소수점은 "점" 이 아니라 "쩜" 으로 읽는다 (사장님 교정: 5.0기가 → 오쩜영기가).
-# 숫자 사이의 점만 바꾼다 — 문장 끝 마침표까지 바꾸면 말이 안 끊긴다.
-_DECIMAL = re.compile(r"(?<=\d)\.(?=\d)")
+#
+# ⚠ 점만 바꾸면 "3쩜5시간" 이 되고, 그 다음은 TTS 손에 달린다. 사장님 교정
+#   2026-08-16: "3.5시간이 아니라 삼쩜오시간". 그래서 소수는 **숫자째 한글로**
+#   바꾼다 — 읽는 쪽에 맡기지 않고 여기서 확정한다.
+#   정수부는 자릿수를 살려 읽고(12 → 십이), 소수부는 한 자씩 읽는다
+#   (0.45 → 영쩜사오). 한국어가 소수를 그렇게 읽는다.
+_DECIMAL_NUM = re.compile(r"(?<![\d.])(\d{1,7})\.(\d{1,4})(?![\d.])")
+_DIGIT_KO = "영일이삼사오육칠팔구"
+_SMALL_KO = ("", "십", "백", "천")
+_BIG_KO = ("", "만", "억", "조")
+
+
+def _int_ko(n: int) -> str:
+    """1234 → '천이백삼십사'. 소수를 읽을 때 정수부에 쓴다."""
+    if n == 0:
+        return "영"
+    out, unit = "", 0
+    while n:
+        n, chunk = divmod(n, 10000)
+        if chunk:
+            part = ""
+            for pos in range(3, -1, -1):
+                d = chunk // (10 ** pos) % 10
+                if not d:
+                    continue
+                # 십·백·천 앞의 '일' 은 읽지 않는다 — '일십이' 가 아니라 '십이'
+                part += ("" if d == 1 and pos else _DIGIT_KO[d]) + _SMALL_KO[pos]
+            out = part + _BIG_KO[unit] + out
+        unit += 1
+    return out
+
+
+def _say_decimal(m: "re.Match") -> str:
+    whole, frac = m.group(1), m.group(2)
+    return _int_ko(int(whole)) + "쩜" + "".join(_DIGIT_KO[int(d)] for d in frac)
 
 # 시각은 시각으로 읽는다 (사장님 교정 2026-08-13: "시간은 시간으로 읽어,
 # 공팔 삼사 이렇게 하지 말고"). 원인은 아래 _SYMBOLS 가 콜론을 지우는 것 —
 # "08:34" 가 "08 34" 가 되면 TTS 는 숫자를 하나씩 읽는다.
 # ⚠ 기호를 지우기 전에 풀어야 한다. 지운 뒤엔 시각이었다는 증거가 없다.
-_TIME_HMS = re.compile(r"\b(\d{1,2}):([0-5]\d):([0-5]\d)\b")
-_TIME_HM = re.compile(r"\b(\d{1,2}):([0-5]\d)\b")
+# ⚠ 경계를 \b 로 잡으면 한국어에서는 안 선다 — 조사가 시각에 딱 붙어 오기
+#   때문이다("14:00부터", "9:30에", "12:58쯤"). 한글도 낱말 문자라 '00' 과
+#   '부' 사이에는 경계가 없어 시각 풀이를 통째로 건너뛰었고, 그러면 아래
+#   비율 규칙이 콜론을 먹어 "십사 대 영영부터" 가 나간다. 사장님 교정
+#   2026-08-16 이 바로 이 소리다 — "':' 이게 들어가면 시간이잖아".
+#   그래서 옆의 소수 규칙과 같이 숫자만 배제하는 전후탐색으로 잡는다.
+_TIME_HMS = re.compile(r"(?<!\d)(\d{1,2}):([0-5]\d):([0-5]\d)(?!\d)")
+_TIME_HM = re.compile(r"(?<!\d)(\d{1,2}):([0-5]\d)(?!\d)")
 
 # 시각이 아닌 콜론은 점수·비율이다 — "3:1" 은 '삼 일' 이 아니라 '3대 1'
 # (사장님 교정 2026-08-13). 시각 변환을 먼저 돌린 뒤 남은 콜론만 잡는다.
 _RATIO = re.compile(r"(?<=\d):(?=\d)")
 
+# '시' 앞의 숫자는 1~12 는 고유어(한 두 세…)로 읽어야 한다 — 한자어(십이)로
+# 읽으면 "열두시"가 "십이시"가 된다. 사장님 교정(2026-08-16): "십이오팔이
+# 아니고 열두시오십팔분". "08:34"를 "8시 34분"으로 콜론만 풀어 숫자는 그대로
+# 둔 게 원인이다 — 소수(3.5시간→삼쩜오시간)와 같은 병이다. 숫자를 TTS 손에
+# 맡기면 시각 낭독용 고유어를 안 쓰고 한자어로 읽어버린다. 그래서 숫자째
+# 한글로 확정한다.
+_HOUR_KO = ("", "한", "두", "세", "네", "다섯", "여섯", "일곱", "여덟",
+            "아홉", "열", "열한", "열두")
+
+
+def _hour_ko(h: int) -> str:
+    """시각의 '시' 는 1~12 는 고유어, 그 밖(0, 13~23)은 한자어로 읽는다."""
+    if 1 <= h <= 12:
+        return _HOUR_KO[h]
+    return _int_ko(h)
+
+
+def clock_words(h: int, mi: int) -> str:
+    """시·분을 한글로 확정해 돌려준다 ("지금 몇 시야" 같은 로컬 답변용).
+
+    _say_time 과 같은 규칙을 쓴다 — 시각을 만드는 자리가 둘이면 한쪽만
+    고쳤을 때 또 어긋난다(2026-08-16 재발이 그 예다).
+    """
+    return _hour_ko(h) + "시" + (f" {_int_ko(mi)}분" if mi else "")
+
+
+def clock_ampm(h: int, mi: int = 0) -> str:
+    """24시간 시각을 사람이 말하듯 — "오후 두시 삼십분".
+
+    clock_words 만으로는 14시가 '십사시' 가 된다. 표기(14:00)를 그대로 읽는
+    자리에서는 그게 맞지만, 일정을 **말로 알려 드리는** 자리에서는 아무도
+    그렇게 말하지 않는다. 사장님 교정의 취지가 '자연스럽게 읽어라' 였으므로
+    브리핑·알림처럼 사람에게 들려주는 자리는 이 함수를 쓴다.
+    """
+    ampm = "오전" if h < 12 else "오후"
+    h12 = h if 1 <= h <= 12 else (h - 12 if h > 12 else 12)
+    return f"{ampm} {clock_words(h12, mi)}"
+
 
 def _say_time(m: "re.Match") -> str:
-    """08:34 → '8시 34분' · 14:00 → '14시' · 09:05:07 → '9시 5분 7초'.
+    """08:34 → '여덟시 삼십사분' · 14:00 → '십사시' · 12:58 → '열두시 오십팔분'.
 
     24시간 표기를 오전/오후로 바꾸지는 않는다 — 원문이 "14:00" 이면
-    "14시" 가 맞고, 오전·오후는 말한 쪽이 이미 붙여 온다(캘린더가 그렇다).
+    "십사시" 가 맞고, 오전·오후는 말한 쪽이 이미 붙여 온다(캘린더가 그렇다).
     """
     h, mi = int(m.group(1)), int(m.group(2))
     if h > 23 or mi > 59:
         return m.group(0)                     # 시각이 아니다 (점수·비율 등)
-    out = f"{h}시" + (f" {mi}분" if mi else "")
+    out = clock_words(h, mi)
     if m.lastindex == 3:
         s = int(m.group(3))
         if s:
-            out += f" {s}초"
+            out += f" {_int_ko(s)}초"
     return out
 
 
@@ -151,13 +242,37 @@ def clean(text: str) -> str:
     t = _RATIO.sub("대 ", t)          # 남은 콜론 = 점수·비율
     for rx, word in _UNITS:
         t = rx.sub(word, t)
-    t = _DECIMAL.sub("쩜", t)
+    t = _DECIMAL_NUM.sub(_say_decimal, t)
     t = _SYMBOLS.sub(" ", t)
     t = _REPEAT_PUNCT.sub(r"\1", t)
     t = _WS.sub(" ", t).strip(" .,")
     if len(t) > config.TTS_MAX_CHARS:
         t = t[: config.TTS_MAX_CHARS].rsplit(" ", 1)[0] + " ... 이하 생략."
     return t
+
+
+def korean_only(text: str) -> str:
+    """영어로만 된 문장을 덜어낸다. 남는 게 없으면 빈 문자열.
+
+    ⚠ 답 전체를 통째로 막으면 안 된다. "안 읽은 메일 6통입니다.
+      yourname00@gmail.com 3통…" 처럼 주소·파일명이 섞인 멀쩡한 답이
+      영문 비율만 보면 누출과 구분되지 않는다 (실측 정상 0.31 : 누출 0.24 —
+      비율로는 못 가른다). 그래서 비율이 아니라 **문장 단위**로 본다.
+
+    실측 근거 — state/transcript.jsonl 의 답변 3,914문장 중 걸리는 것은
+    5문장뿐이고 그중 4개가 진짜 영어 누출이다. 나머지 하나는
+    "2 files changed, 2 insertions(+)…" 라는 git 요약 줄인데, 그건
+    소리로 들어도 못 알아듣는 줄이라 덜어내는 편이 낫다.
+    """
+    keep = []
+    for s in _FOREIGN_SENT.split(text):
+        s = s.strip()
+        if not s:
+            continue
+        if not _HANGUL.search(s) and len(_LATIN.findall(s)) >= _FOREIGN_MIN_LETTERS:
+            continue
+        keep.append(s)
+    return " ".join(keep)
 
 
 # ─────────────────────────────────────────────────────────
@@ -301,6 +416,16 @@ def say(text: str, *, block: bool = True, raw: bool = False,
         log(f"미팅 모드 침묵 — 삼킴: {text[:24]!r}")
         return
     body = text if raw else clean(text)
+    # 영어로 새어 나온 문장은 소리로 내보내지 않는다. 말투 통일과 같은
+    # 자리에서 거는 이유도 같다 — 답을 만드는 곳이 넷이라 한 곳씩 막으면
+    # 새 경로가 생길 때마다 또 뚫린다. raw=True 는 안 건드린다.
+    if body and not raw and getattr(config, "SPEAK_KOREAN_ONLY", True):
+        kept = korean_only(body)
+        if kept != body:
+            log(f"영어 문장은 안 읽음: {body[:40]!r}")
+            # 통째로 영어였으면 침묵하지 않는다 — 아무 소리도 안 나면
+            # 사장님께는 고장으로 보인다 (2026-08-13 05:42 와 같은 교훈).
+            body = kept or "답이 영어로 나와서 안 읽었어요. 다시 한번 말씀해 주시겠어요?"
     # 말끝을 한 문체로 맞춘다 — 답을 만드는 곳이 넷이어도(고정 문구·로컬
     # 규칙·큐웬·클로드) 사장님이 듣는 목소리는 하나여야 한다. 네 곳을 각각
     # 고치면 새 문구가 생길 때마다 또 어긋나므로 길목에서 한 번에 건다.

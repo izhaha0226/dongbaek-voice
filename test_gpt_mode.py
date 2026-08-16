@@ -12,6 +12,10 @@
   ② 미팅과 지피티가 서로의 종료 문구로 닫히지 않는가
     python test_gpt_mode.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import sys
 
 import call_notes

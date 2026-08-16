@@ -62,6 +62,16 @@ def run(tool: str, args: dict) -> str:
             return dbstore.search(q, days=int(args.get("days", 7)))
         return dbstore.recent_brief(int(args.get("n", 10)), max_chars=100) or "기록 없음"
 
+    if tool == "mail_watch_add":
+        import mail_watch
+
+        keyword = str(args.get("keyword", "")).strip()
+        if not keyword:
+            return "키워드가 없습니다."
+        note = str(args.get("note", "")).strip()
+        w = mail_watch.add(keyword, note)
+        return f"'{w['keyword']}' 메일 오면 알려드릴게요. 30분마다 확인합니다."
+
     if tool == "logs":
         # 데몬 일지 검색 — "내가 몇 번 불렀어?" 에 답하려면 이게 있어야
         # 한다 (2026-08-13 06:0x 실사례: "로그를 직접 볼 도구가 없어서").

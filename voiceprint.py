@@ -19,6 +19,9 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime
+
 import numpy as np
 
 import config
@@ -126,6 +129,42 @@ def _save_prints(prints: dict[str, np.ndarray]) -> None:
     config.VOICEPRINT_FILE.parent.mkdir(parents=True, exist_ok=True)
     np.savez(config.VOICEPRINT_FILE, **prints)
     _prints = prints
+    _backup_enrolled(prints)
+
+
+def _backup_enrolled(prints: dict[str, np.ndarray]) -> None:
+    """등록 지문은 영구 보관한다 (사장님 지시 2026-08-16).
+
+    등록 지문에는 상한이 없다 — 학습 지문(#적응)과 남 지문(#남)만 넘칠 때
+    솎아낸다. 그러나 '지워지지 않는다' 와 '영구히 남는다' 는 다른 말이다.
+    파일은 state/ 아래 한 장뿐이고, state/ 는 gitignore 라 버전 관리 밖이다.
+    2026-08-13 새벽에 자가개선 롤백의 git clean 이 같은 자리의 dongbaek.db 를
+    쓸어간 전례가 있다. 그때 잃은 건 다시 쌓이지만, 목소리는 사장님이 다시
+    등록해 주셔야 돌아온다.
+
+    그래서 등록 지문만 따로 뜬다. 학습 지문은 뜨지 않는다 — 그건 다시 배우면
+    되고, 섞어 두면 어느 것이 '사람이 등록한 원본' 인지 흐려진다.
+    바뀔 때만 쓴다(하루 67번 도는 학습마다 쓰면 디스크만 닳는다).
+    """
+    try:
+        keep = {k: v for k, v in prints.items()
+                if not k.endswith(_ADAPT) and k != _IMPOSTER}
+        if not keep:
+            return                      # 빈 걸로 좋은 백업을 덮지 않는다
+        sig = {k: len(v) for k, v in sorted(keep.items())}
+        d = config.STATE / "voiceprints-enrolled"
+        d.mkdir(parents=True, exist_ok=True)
+        stamp = d / "signature.json"
+        try:
+            if json.loads(stamp.read_text()) == sig:
+                return                  # 등록 지문은 그대로다
+        except (OSError, ValueError):
+            pass
+        np.savez(d / "latest.npz", **keep)
+        np.savez(d / f"{datetime.now():%Y%m%d}.npz", **keep)   # 날짜별 한 장
+        stamp.write_text(json.dumps(sig, ensure_ascii=False))
+    except Exception:
+        pass                            # 백업 실패로 등록이 막히면 본말전도다
 
 
 def enrolled() -> dict[str, int]:
@@ -280,9 +319,32 @@ def adapt(name: str, audio: np.ndarray, score: float) -> bool:
     cur = prints.get(key)
     stack = e[None, :] if cur is None else np.vstack([cur, e[None, :]])
     cap = max(1, int(getattr(config, "VOICE_ADAPT_MAX", 10)))
-    prints[key] = stack[-cap:]
+    prints[key] = _thin(stack, cap)
     _save_prints(prints)
     return True
+
+
+def _thin(stack: np.ndarray, cap: int) -> np.ndarray:
+    """상한을 넘으면 **가장 겹치는** 하나를 버린다 — 오래된 것이 아니라.
+
+    ⚠ 오래된 것부터 버리면 기억이 '최근 몇 시간' 이 된다. 실측 2026-08-16:
+      학습 대상(0.60 이상 통과)이 하루 67건인데 상한이 10개였다. 남는 건
+      최근 3.5시간치뿐이라, 아침 목소리·먼 목소리·감기 목소리가 그날 오후
+      잡담에 밀려 사라졌다. 그러면 같은 조건에서 매번 다시 거절당한다.
+      실제로 문턱 근처(0.35~0.45) 거절이 하루 39건에서 85건으로 늘었다.
+
+    지문의 값어치는 개수가 아니라 **조건의 다양성** 이다. verify 가 최대값을
+    쓰기 때문에, 서로 닮은 지문 열 개보다 다른 조건 열 개가 훨씬 낫다.
+    그래서 넘칠 때는 가장 닮은 짝을 찾아 그중 '나머지와 더 겹치는' 쪽을
+    버린다. 남은 자리는 아직 없는 조건이 채운다.
+    """
+    while len(stack) > cap:
+        sim = stack @ stack.T
+        np.fill_diagonal(sim, -1.0)
+        i, j = np.unravel_index(int(np.argmax(sim)), sim.shape)
+        # 둘 중 나머지 전체와 더 겹치는 쪽이 덜 아깝다
+        stack = np.delete(stack, i if sim[i].sum() >= sim[j].sum() else j, axis=0)
+    return stack
 
 
 # ─────────────────────────────────────────────────────────

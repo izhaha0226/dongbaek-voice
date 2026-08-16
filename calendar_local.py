@@ -175,13 +175,13 @@ def create(title: str, start: datetime, hours: float = 1.0) -> str | None:
         ok, err = store.saveEvent_span_error_(ev, 0, None)
         if not ok:
             return None
+        import speak
+
         d = start
         yo = _WEEK[d.weekday()]
         ampm = "오전" if d.hour < 12 else "오후"
         h12 = d.hour if 1 <= d.hour <= 12 else (d.hour - 12 if d.hour > 12 else 12)
-        when = f"{d.month}월 {d.day}일 {yo}요일 {ampm} {h12}시"
-        if d.minute:
-            when += f" {d.minute}분"
+        when = f"{d.month}월 {d.day}일 {yo}요일 {ampm} " + speak.clock_words(h12, d.minute)
         return f"{when}에 {title} 일정을 등록했습니다."
     except Exception:
         return None
@@ -330,12 +330,12 @@ def reschedule(keyword: str, start: datetime, hours: float | None = None,
 
 def _when_words(d: datetime) -> str:
     """소리내어 읽을 시각. create 와 같은 말투를 쓴다."""
+    import speak
+
     ampm = "오전" if d.hour < 12 else "오후"
     h12 = d.hour if 1 <= d.hour <= 12 else (d.hour - 12 if d.hour > 12 else 12)
-    when = f"{d.month}월 {d.day}일 {_WEEK[d.weekday()]}요일 {ampm} {h12}시"
-    if d.minute:
-        when += f" {d.minute}분"
-    return when
+    return (f"{d.month}월 {d.day}일 {_WEEK[d.weekday()]}요일 {ampm} "
+            + speak.clock_words(h12, d.minute))
 
 
 _WEEK = "월화수목금토일"
@@ -390,10 +390,12 @@ def speak_events(days: int = 7, limit: int = 3, only_date=None,
         yo = _WEEK[d.weekday()]
         when = f"{d.month}월 {d.day}일 {yo}요일"
         if not e["all_day"]:
+            import speak
+
             hour = d.hour
             ampm = "오전" if hour < 12 else "오후"
             h12 = hour if 1 <= hour <= 12 else (hour - 12 if hour > 12 else 12)
-            when += f" {ampm} {h12}시" + (f" {d.minute}분" if d.minute else "")
+            when += f" {ampm} " + speak.clock_words(h12, d.minute)
         else:
             when += " 하루 종일"
         parts.append(f"{when} {e['title']}")

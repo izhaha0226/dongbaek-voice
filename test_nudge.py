@@ -4,6 +4,10 @@
 핵심: 창 안의 일정만, 한 번만, 종일 일정은 제외.
     python test_nudge.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import sys
 from datetime import datetime, timedelta
 

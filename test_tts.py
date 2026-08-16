@@ -4,6 +4,10 @@
 핵심 확인: 답변이 길어져도 '첫 소리까지의 시간'이 일정하게 유지되는가.
     python test_tts.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import time
 
 import sounddevice as sd
@@ -91,7 +95,7 @@ samples = [
               "구매형 키워드 비중이 늘었습니다. 정보성 키워드는 유입만 많습니다. "
               "전환이 거의 없습니다. 예산을 옮기는 걸 권합니다."),
 ]
-first_times = []
+rows = []
 for label, text in samples:
     PLAYED.clear()
     T0 = time.time()
@@ -102,13 +106,32 @@ for label, text in samples:
         continue
     total = time.time() - T0
     first = PLAYED[0][0] if PLAYED else float("inf")
-    first_times.append(first)
+    rows.append((label, first, total, len(PLAYED)))
     print(f"  {label:<6} 조각 {len(PLAYED)}개 · 첫 소리 {first:.2f}초 · 전체 {total:.2f}초")
+    # 재생 조각 수 = 분할 결과. 조각을 뭉쳐 내보내면 첫 소리가 그만큼 늦는데,
+    # 시간으로는 못 잡는다 — 뭉치면 조각당 몫도 같이 커져 비율이 가려진다.
+    check(f"{label} 조각 {len(PLAYED)}개 = 분할 결과", len(PLAYED),
+          len(tts.split_sentences(text)))
 
-if len(first_times) == len(samples):
-    spread = max(first_times) - min(first_times)
-    check(f"첫 소리 편차 {spread:.2f}초 < 0.6초", spread < 0.6, True)
-    check(f"최악의 첫 소리 {max(first_times):.2f}초 < 1.0초", max(first_times) < 1.0, True)
+# 예전에는 초 단위로 못을 박았다 — "편차 0.6초 미만", "최악의 첫 소리 1.0초
+# 미만". 둘 다 시계에 기댄 단정이라 기계가 바쁘면 파이프라이닝이 멀쩡한데도
+# 빨개졌다 (2026-08-14 실측: 단독 0.82~0.86초, 스위트 안 1.09초. 같은 문장을
+# 네 번 합성해도 0.66~1.04초로 흔들려, 편차 0.6초는 잡음만으로도 넘는다).
+# test_speak_overlap 에서 걷어낸 것과 같은 병이다.
+#
+# 대신 이 판에서 잰 값끼리 비교한다: 첫 소리는 '조각 하나' 몫이어야지
+# '답변 전체' 몫이면 안 된다. 조각당 합성비(전체÷조각수)는 기계가 느려지면
+# 첫 소리와 같이 느려지므로 부하가 걸려도 비율은 그대로다.
+if len(rows) == len(samples):
+    first_times = [r[1] for r in rows]
+    print(f"  (참고) 첫 소리 편차 {max(first_times) - min(first_times):.2f}초 ·"
+          f" 최악 {max(first_times):.2f}초 — 절대값은 단정하지 않는다")
+    for label, first, total, n in rows:
+        if n < 2:   # 조각이 하나뿐이면 '첫 소리=전체' 라 볼 게 없다
+            continue
+        budget = total / n * 1.6 + 0.2
+        check(f"{label} 첫 소리 {first:.2f}초 ≤ 조각 하나 몫 {budget:.2f}초",
+              first <= budget, True)
 
 print("\n[5] 폴백 — Supertonic 이 죽어도 say 로 살아남는가")
 orig = tts._ensure_loaded

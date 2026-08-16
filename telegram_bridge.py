@@ -24,6 +24,7 @@
 import json
 import queue
 import subprocess
+import os
 import sys
 import tempfile
 import threading
@@ -90,7 +91,18 @@ def send_text(token: str, chat_id: int, text: str) -> int | None:
     음성 문답 미러가 이걸 쓴다: 명령을 알아들은 즉시 한 줄 띄우고,
     답이 나오면 같은 메시지를 고쳐 답변을 채운다. 새 메시지를 또 보내면
     채팅이 두 배로 시끄러워진다.
+
+    ⚠ 테스트가 돌 때는 보내지 않는다. **여기가 폰으로 나가는 유일한 문이다** —
+      briefing._to_telegram, wakeup, 음성 미러가 전부 이 함수를 거친다.
+      부르는 쪽마다 가드를 다는 방식으로는 언젠가 한 곳이 빠지고, 실제로
+      빠졌다: 2026-08-15 06:17~06:47, call_notes.save() 에 붙인 공유 링크
+      전송이 test_call_notes 를 타고 나가 "📞 통화 정리" 가 폰에 반복해서
+      떴다. 위키 경로가 임시폴더(/var/folders/.../tmpXXXX/)라 사장님이
+      이상함을 알아채셨다. 스위트를 돌린 횟수만큼 나갔다.
+      한 곳을 막으면 앞으로 누가 무슨 알림을 새로 붙여도 새지 않는다.
     """
+    if os.path.basename(sys.argv[0] or "").startswith("test_"):
+        return None
     # 텔레그램 메시지 상한은 4096자
     res = api(token, "sendMessage", {"chat_id": chat_id, "text": text[:4000]})
     try:
@@ -101,6 +113,8 @@ def send_text(token: str, chat_id: int, text: str) -> int | None:
 
 def edit_text(token: str, chat_id: int, message_id: int, text: str) -> bool:
     """이미 보낸 메시지를 고쳐 쓴다. 실패해도 무해 — 원문은 남는다."""
+    if os.path.basename(sys.argv[0] or "").startswith("test_"):
+        return False
     res = api(token, "editMessageText",
               {"chat_id": chat_id, "message_id": message_id, "text": text[:4000]})
     return bool(res.get("ok"))
@@ -108,6 +122,8 @@ def edit_text(token: str, chat_id: int, message_id: int, text: str) -> bool:
 
 def send_voice(token: str, chat_id: int, text: str) -> bool:
     """답변을 Supertonic 으로 합성해 음성메시지로 보낸다. 실패해도 무해."""
+    if os.path.basename(sys.argv[0] or "").startswith("test_"):
+        return False
     try:
         import numpy as np
         import soundfile as sf
@@ -174,6 +190,8 @@ def _upload_voice(token: str, chat_id: int, path: str) -> bool:
 
 def send_photo(token: str, chat_id: int, path: str, caption: str = "") -> bool:
     """사진 전송 — 뉴스 웹툰 등. _upload_voice 와 같은 multipart, 표준 라이브러리만."""
+    if os.path.basename(sys.argv[0] or "").startswith("test_"):
+        return False
     boundary = "----dongbaek" + str(int(time.time() * 1000))
     body = bytearray()
 

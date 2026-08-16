@@ -20,12 +20,14 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import config
+import dbstore
 
 ROOT = Path(config.CLAUDE_WORKDIR)
 IMPROVE_MD = ROOT / "IMPROVE.md"
@@ -101,16 +103,9 @@ def _recent_errors(hours: int = 26) -> list[str]:
     """transcript 의 route=error — 실제로 사장님 명령이 실패한 순간들."""
     since = datetime.now().strftime("%Y-%m-%dT00:00")
     out = []
-    try:
-        for line in config.TRANSCRIPT_LOG.read_text().splitlines()[-500:]:
-            try:
-                r = json.loads(line)
-            except ValueError:
-                continue
-            if r.get("route") == "error" and r.get("ts", "") >= since:
-                out.append(f"명령 실패: {r.get('command','')[:50]} — {r.get('error','')[:80]}")
-    except OSError:
-        pass
+    for r in dbstore.rows(limit=500):
+        if r.get("route") == "error" and r.get("ts", "") >= since:
+            out.append(f"명령 실패: {r.get('command','')[:50]} — {r.get('error','')[:80]}")
     return out[-5:]
 
 
@@ -120,21 +115,14 @@ def _observations() -> list[str]:
     since = (datetime.now().date() - timedelta(days=7)).isoformat()
     routes: dict = {}
     repeats: dict = {}
-    try:
-        for line in config.TRANSCRIPT_LOG.read_text().splitlines()[-2000:]:
-            try:
-                r = json.loads(line)
-            except ValueError:
-                continue
-            if r.get("ts", "") < since:
-                continue
-            routes[r.get("route")] = routes.get(r.get("route"), 0) + 1
-            if r.get("route") == "claude":
-                c = (r.get("command") or "").strip()[:40]
-                if len(c) >= 6:
-                    repeats[c] = repeats.get(c, 0) + 1
-    except OSError:
-        pass
+    for r in dbstore.rows(limit=2000):
+        if r.get("ts", "") < since:
+            continue
+        routes[r.get("route")] = routes.get(r.get("route"), 0) + 1
+        if r.get("route") == "claude":
+            c = (r.get("command") or "").strip()[:40]
+            if len(c) >= 6:
+                repeats[c] = repeats.get(c, 0) + 1
     if routes:
         obs.append("최근 7일 처리 분포: "
                    + ", ".join(f"{k} {v}건" for k, v in sorted(routes.items())))
@@ -204,6 +192,50 @@ def _observations() -> list[str]:
     return obs
 
 
+HISTORY_FILE = config.STATE / "self_improve_history.jsonl"
+
+
+def _history_add(mode: str, result: str, files: list[str] | None = None,
+                 detail: str = "") -> None:
+    """이번 회차가 무엇을 시도했고 어떻게 끝났는지 남긴다.
+
+    ⚠ 이게 없어서 자가정비가 '자가시도' 에 머물렀다. 롤백이 일곱 번 있었는데
+      일곱 번 다 처음처럼 시작했다 — 어젯밤 "이 방법은 테스트에서 깨졌다" 를
+      오늘 밤 모른다. 시행착오는 있는데 착오가 쌓이지 않았다.
+      (동백은 다른 데서는 다 배운다 — 오인식 교정표, 화자 지문 적응,
+       대화 채점. 정작 자기 코드를 고치는 층만 기억이 없었다.)
+    """
+    if os.path.basename(sys.argv[0] or "").startswith("test_"):
+        return
+    try:
+        rec = {"ts": datetime.now().isoformat(timespec="seconds"),
+               "mode": mode, "result": result,
+               "files": (files or [])[:6], "detail": detail[:200]}
+        with HISTORY_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def _history_lines(limit: int = 12) -> list[str]:
+    """지난 시도들을 프롬프트에 넣을 꼴로. 최신이 뒤로 간다."""
+    try:
+        raw = HISTORY_FILE.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in raw[-limit:]:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        when = str(r.get("ts", ""))[5:10]
+        files = ", ".join(r.get("files") or []) or "-"
+        detail = f" — {r['detail']}" if r.get("detail") else ""
+        out.append(f"{when} [{r.get('result','?')}] {files}{detail}")
+    return out
+
+
 def _write_note(note: dict) -> None:
     """결과 노트. 아침 브리핑이 이걸 읽어드리므로 진짜 실행일 때만 쓴다.
 
@@ -263,6 +295,8 @@ _PROMPT_FIX = """너는 동백(이 폴더의 한국어 음성 비서)의 야간 
 
 증거:
 {evidence}
+
+{history}
 """
 
 # 사장님 지시(2026-08-11): "좋은 아이디어가 있을 때도 가설을 수립해서
@@ -281,11 +315,17 @@ _PROMPT_IDEA = """너는 동백(이 폴더의 한국어 음성 비서)의 야간
 
 관찰 (최근 7일):
 {evidence}
+
+{history}
 """
 
 
-def run_claude(prompt: str) -> tuple[bool, str]:
-    """클로드 코드 한 판 — dev 정책과 같은 모양, 세션 없이 새로."""
+def run_claude(prompt: str, cwd: Path | None = None) -> tuple[bool, str]:
+    """클로드 코드 한 판 — dev 정책과 같은 모양, 세션 없이 새로.
+
+    cwd 를 주면 거기서 돈다. 사람이 작업 중일 때 별도 워크트리에서
+    일하기 위한 것이다 (_workspace 참조).
+    """
     pol = config.TOOL_POLICY["dev"]
     cmd = [config.CLAUDE_BIN, "-p", prompt,
            "--model", getattr(config, "SELF_IMPROVE_MODEL", None) or pol.get("model") or "",
@@ -295,7 +335,7 @@ def run_claude(prompt: str) -> tuple[bool, str]:
         cmd += ["--mcp-config", str(config.MCP_CONFIG), "--strict-mcp-config"]
     try:
         out = subprocess.run(
-            cmd, cwd=str(ROOT), capture_output=True, text=True,
+            cmd, cwd=str(cwd or ROOT), capture_output=True, text=True,
             timeout=getattr(config, "SELF_IMPROVE_TIMEOUT_SEC", 900),
         )
     except subprocess.TimeoutExpired:
@@ -315,6 +355,58 @@ def _git(repo: Path, *args: str) -> str:
 
 def _tree_clean(repo: Path) -> bool:
     return _git(repo, "status", "--porcelain") == ""
+
+
+def _changed_since(repo: Path, base: str) -> list[str]:
+    """base 이후 바뀐 파일들 (추적·미추적 모두).
+
+    `git add -A` 대신 이걸 쓴다. 시작할 때 트리가 깨끗했으므로 여기 잡히는
+    것은 이번 회차가 만든 것이다 — 사람이 중간에 끼어들지 않았다면.
+    그 '끼어듦' 은 _human_busy 가 막는다.
+    """
+    # ⚠ 고정 위치(line[3:])로 자르면 안 된다. _git 이 출력을 strip 하므로
+    #   첫 줄만 앞 공백이 사라져 ' M config.py' → 'M config.py' 가 되고,
+    #   3글자를 떼면 'onfig.py' 라는 없는 파일이 나온다. 실제로 그렇게 나왔다.
+    #   상태 코드는 1~2글자라 폭이 일정하지 않다 — 패턴으로 잡는다.
+    out = _git(repo, "status", "--porcelain")
+    files = []
+    for line in (out or "").splitlines():
+        m = re.match(r"^\s*\S{1,2}\s+(.*)$", line)
+        if not m:
+            continue
+        name = m.group(1).strip().strip('"')
+        if " -> " in name:                 # 이름이 바뀐 것은 새 이름만
+            name = name.split(" -> ", 1)[1]
+        if name:
+            files.append(name)
+    return files
+
+
+def _human_busy(repo: Path, within_sec: float) -> str:
+    """방금 사람이 만진 파일이 있으면 그 이름. 없으면 빈 문자열.
+
+    ⚠ 트리가 깨끗한지만 보는 것으로는 모자랐다. 사람이 파일을 고치는 동안엔
+      '편집과 편집 사이' 에 잠깐씩 깨끗해 보이고, 러너가 하필 그 틈에 들어와
+      남의 작업을 자기 커밋에 담아 갔다 — 2026-08-14 하루에 다섯 번, 한 번은
+      반쪽 상태로 커밋됐다.
+      그래서 상태가 아니라 **시각**을 본다. 방금 손댄 파일이 있으면 비켜간다.
+    """
+    import time
+
+    now = time.time()
+    for p in repo.glob("*.py"):
+        try:
+            if now - p.stat().st_mtime < within_sec:
+                return p.name
+        except OSError:
+            continue
+    for p in (repo / "tests").glob("*.py"):
+        try:
+            if now - p.stat().st_mtime < within_sec:
+                return f"tests/{p.name}"
+        except OSError:
+            continue
+    return ""
 
 
 def _rebase_if_moved(repo: Path, base: str) -> str:
@@ -386,6 +478,59 @@ def _rollback(repo: Path, base: str) -> None:
     if moved:
         _report(f"롤백 중 새 파일 {len(moved)}개 격리 (사람 것일 수 있음): "
                 f"{', '.join(moved[:5])} → {qdir}")
+
+
+def _workspace_open() -> tuple[Path, str, str]:
+    """일할 자리를 스스로 고른다 — (작업경로, 브랜치 또는 "", 사유).
+
+    사장님 지시 (2026-08-15): "트리가 지저분하다고 자가정비가 작동을 안 한다.
+    스스로 신규 트리를 만들어서 하든 트리를 정리하고 하든 선제 작업을 스스로
+    결정하게 해줘."
+
+    그동안은 트리가 더러우면 그냥 물러났다. 사람이 하루 종일 코드를 만지는
+    날에는 자가정비가 통째로 쉬어버린다 — 실측 37회 중 8회가 그 이유였다.
+
+    ⚠ 사람 작업을 치우지 않는다. 스태시도 커밋도 하지 않는다 — 남의 작업에
+      손대는 순간 '정비' 가 아니라 사고다. 대신 **자기 자리를 새로 만든다**:
+      git worktree 로 HEAD 를 떼어낸 별도 폴더에서 일한다. 사람은 자기
+      트리에서 계속 일하고, 둘은 서로를 못 본다.
+    """
+    if _tree_clean(ROOT):
+        return ROOT, "", "트리가 깨끗해 제자리에서"
+
+    branch = f"improve/{datetime.now():%Y%m%d-%H%M}"
+    path = ROOT / ".git" / "improve-worktree"
+    try:
+        if path.exists():                  # 지난 회차가 남긴 것 — 치우고 시작
+            _git(ROOT, "worktree", "remove", "--force", str(path))
+        _git(ROOT, "worktree", "add", "-b", branch, str(path), "HEAD")
+    except Exception:
+        return ROOT, "", "워크트리를 못 만듦"
+    if not (path / "self_improve.py").exists():
+        return ROOT, "", "워크트리가 비어 있음"
+    return path, branch, f"사람이 작업 중이라 별도 워크트리({branch})에서"
+
+
+def _workspace_land(branch: str, work: Path) -> tuple[bool, str]:
+    """워크트리에서 만든 커밋을 본 트리로 가져온다. (성공, 사유).
+
+    ⚠ --ff-only 다. 사람 작업 위에 병합 커밋을 얹지 않는다 — 충돌이 나면
+      가져오지 않고 브랜치를 남긴 채 알린다. 남의 작업과 겹치는 변경을
+      밤에 몰래 섞는 것보다, 아침에 사람이 보고 정하는 편이 낫다.
+    """
+    ahead = _git(ROOT, "rev-list", "--count", f"HEAD..{branch}")
+    if not (ahead or "").strip().isdigit() or int(ahead) == 0:
+        return False, "워크트리에 새 커밋이 없음"
+    out = _git(ROOT, "merge", "--ff-only", branch)
+    landed = _git(ROOT, "rev-list", "--count", f"HEAD..{branch}") == "0"
+    if not landed:
+        return False, f"본 트리와 겹쳐 가져오지 못함 — 브랜치 {branch} 에 남겨둠 ({(out or '')[:60]})"
+    try:
+        _git(ROOT, "worktree", "remove", "--force", str(work))
+        _git(ROOT, "branch", "-d", branch)
+    except Exception:
+        pass
+    return True, ""
 
 
 def run_suite(repo: Path) -> tuple[bool, str]:
@@ -462,10 +607,18 @@ def main() -> int:
         except Exception as e:      # 교정표 때문에 야간 정비가 죽으면 안 된다
             print(f"교정표 학습 건너뜀: {e}")
 
+    # ⚠ 지난 시도를 프롬프트에 함께 넘긴다. 이게 없으면 어젯밤 롤백된 방법을
+    #   오늘 밤 또 시도한다 — 실제로 일곱 번 롤백하고 일곱 번 다 잊었다.
+    #   롤백을 버리지 않고 지식으로 바꾸는 유일한 자리다.
+    _hl = _history_lines()
+    history = ("[지난 시도 — 같은 것을 또 하지 마라. 되돌려진 것은 이유가 있다]\n"
+               + "\n".join(_hl)) if _hl else ""
+
     # 증거(오류·백로그)가 있으면 수리 모드, 없으면 관찰 기반 아이디어 모드.
     if evidence:
         mode = "fix"
-        prompt = _PROMPT_FIX.format(mode=mode, evidence="\n\n".join(evidence))
+        prompt = _PROMPT_FIX.format(mode=mode, history=history,
+                                    evidence="\n\n".join(evidence))
     else:
         obs = _observations()
         if not obs:
@@ -473,58 +626,114 @@ def main() -> int:
             print("증거도 관찰도 없음 — 오늘은 쉰다 (클로드 호출 없음)")
             return 0
         mode = "idea"
-        prompt = _PROMPT_IDEA.format(mode=mode, evidence="\n".join(f"- {o}" for o in obs))
+        prompt = _PROMPT_IDEA.format(mode=mode, history=history,
+                                     evidence="\n".join(f"- {o}" for o in obs))
 
     if dry:
         print(prompt)
         return 0
 
-    if not _tree_clean(ROOT):
-        _report("작업 트리가 깨끗하지 않아 건너뜀 — 사람 작업을 밟지 않는다.")
-        _save_stamps(stamps)
-        return 0
+    # 일할 자리를 스스로 고른다. 트리가 더러우면 물러나는 게 아니라
+    # 자기 워크트리를 새로 판다 (사장님 지시 2026-08-15).
+    #
+    # ⚠ 사람이 방금 만진 파일이 있어도 마찬가지다 — 예전엔 여기서 물러났는데,
+    #   그러면 사람이 코드를 만지는 날은 자가정비가 통째로 쉰다 (실측 37회 중
+    #   8회가 그 이유). 물러나는 대신 자리를 옮긴다.
+    work, branch, why = _workspace_open()
+    _report(f"자가 정비 시작 — {why}.")
 
-    base = _git(ROOT, "rev-parse", "HEAD")
-    ok, reply = run_claude(prompt)
+    base = _git(work, "rev-parse", "HEAD")
+    ok, reply = run_claude(prompt, cwd=work)
     _save_stamps(stamps)               # 실패해도 같은 오류로 매일 재도전하진 않는다
+    # 이번 회차가 만진 파일 — 결말마다 이력에 함께 남긴다. 어느 파일에서
+    # 무엇이 깨졌는지가 다음 회차의 가장 값진 정보다.
+    _touched = _changed_since(work, base)
 
     if not ok:
-        _rollback(ROOT, base)
+        _rollback(work, base)
         _write_note({"mode": mode, "ok": False, "changed": False,
                      "result": f"실행 실패({reply[:120]}) — 되돌림"})
+        _history_add(mode, "실행실패", _touched, reply[:120])
         _report(f"실패({reply[:120]}) — 되돌렸습니다.")
         return 1
 
     if reply.startswith("변경 없음"):
-        if not _tree_clean(ROOT) or _git(ROOT, "rev-parse", "HEAD") != base:
-            _rollback(ROOT, base)      # 말과 행동이 다르면 행동을 지운다
+        if not _tree_clean(work) or _git(work, "rev-parse", "HEAD") != base:
+            _rollback(work, base)      # 말과 행동이 다르면 행동을 지운다
         _write_note({"mode": mode, "ok": True, "changed": False,
                      "result": reply[:200]})
+        _history_add(mode, "변경없음", [], reply[:120])
         _report(f"변경 없음. {reply[:200]}")
         return 0
 
-    changed = _changed_lines(ROOT, base)
+    changed = _changed_lines(work, base)
     if changed > getattr(config, "SELF_IMPROVE_MAX_DIFF", 400):
-        _rollback(ROOT, base)
+        _rollback(work, base)
         _write_note({"mode": mode, "ok": False, "changed": False,
                      "result": f"diff {changed}줄 상한 초과 — 되돌림"})
+        _history_add(mode, "diff상한초과", _touched, f"{changed}줄")
         _report(f"diff {changed}줄 — 상한 초과라 통째로 되돌렸습니다. "
                 "야간 자가 정비는 작게만 고친다.")
         return 1
 
-    passed, failed_at = run_suite(ROOT)
+    # ⚠ 자기 자를 고치는 것은 개선이 아니다. 검증이 테스트뿐인데 그 테스트를
+    #   스스로 고치면 검증이 무의미해진다 — 실제로 자가개선 10건 중 2건이
+    #   테스트 수정이었고, 둘 다 "시계를 믿던 것" 이었다. 부하가 걸리면
+    #   시간 검사가 빨개지고, 그걸 '고칠 거리' 로 보고 자를 손댄 것이다.
+    #   사람이 보고 판단할 일이라 되돌리고 알린다.
+    touched_tests = [f for f in _changed_since(work, base) if f.startswith("tests/")]
+    if touched_tests:
+        _rollback(work, base)
+        _write_note({"mode": mode, "ok": False, "changed": False,
+                     "result": f"테스트를 고치려 해서 되돌림: {', '.join(touched_tests[:3])}"})
+        _history_add(mode, "테스트를고치려함", touched_tests)
+        _report(f"테스트({', '.join(touched_tests[:3])})를 고치려 해서 되돌렸습니다. "
+                "검증 도구는 사람이 봐야 합니다.")
+        return 1
+
+    passed, failed_at = run_suite(work)
     if not passed:
-        _rollback(ROOT, base)
+        _rollback(work, base)
         _write_note({"mode": mode, "ok": False, "changed": False,
                      "result": f"테스트 실패({failed_at}) — 되돌림"})
+        _history_add(mode, "테스트실패", _touched, failed_at)
         _report(f"테스트 실패({failed_at}) — 되돌렸습니다.")
         return 1
 
-    if not _tree_clean(ROOT):          # 커밋을 안 했으면 러너가 마무리한다
-        _git(ROOT, "add", "-A")
-        _git(ROOT, "commit", "-m", "[자가개선] 야간 정비 (러너 마무리 커밋)")
+    if not _tree_clean(work):          # 커밋을 안 했으면 러너가 마무리한다
+        # ⚠ `git add -A` 를 쓰면 안 된다. 사람이 편집 중이던 미커밋 파일까지
+        #   통째로 담아, 커밋 메시지와 내용물이 어긋난 커밋이 된다.
+        #   2026-08-14 하루에만 다섯 번 그랬다 — 사람의 말투 작업·말끝 판정·
+        #   메일 도구가 "[자가개선] 야간 정비" 라는 이름으로 들어갔고,
+        #   한 번은 편집 도중에 걸려 **반쪽 상태로** 커밋됐다.
+        #   담을 것은 이번 회차가 만진 파일뿐이다.
+        mine = _changed_since(work, base)
+        if mine:
+            _git(work, "add", "--", *mine)
+            _git(work, "commit", "-m", "[자가개선] 야간 정비 (러너 마무리 커밋)")
+        else:
+            _report("바뀐 파일을 특정하지 못해 마무리 커밋을 건너뜁니다.")
 
-    log_line = _git(ROOT, "log", "--oneline", f"{base}..HEAD")
+    # 통과했다. 무엇이 통했는지도 남긴다 — 실패만 쌓으면 "하지 마라" 만
+    # 늘어나고, 통한 방향은 다음 회차가 알 길이 없다.
+    _history_add(mode, "성공", _touched, (reply or "")[:120])
+
+    log_line = _git(work, "log", "--oneline", f"{base}..HEAD")
+
+    # 별도 워크트리에서 일했으면 본 트리로 가져온다. 못 가져오면(사람 작업과
+    # 겹치면) 브랜치를 남긴 채 알린다 — 밤에 몰래 섞는 것보다 아침에 사람이
+    # 보고 정하는 편이 낫다. 데몬은 본 트리에서 도므로, 가져오기 전에는
+    # 재시작해봐야 옛 코드다.
+    if branch:
+        landed, why_land = _workspace_land(branch, work)
+        if not landed:
+            _write_note({"mode": mode, "ok": True, "changed": False,
+                         "result": f"고쳤지만 본 트리로 못 가져옴 — {why_land}"})
+            _history_add(mode, "가져오기보류", _touched, why_land)
+            _report(f"고쳐서 검증까지 끝냈는데 {why_land}. "
+                    "아침에 확인하고 합쳐 주세요.")
+            return 0
+
     subprocess.run(["./restart.sh"], cwd=str(ROOT), capture_output=True,
                    text=True, timeout=120)
 

@@ -31,6 +31,7 @@ import speak
 import call_notes  # noqa: E402
 import dblog  # noqa: E402
 import dbstore  # noqa: E402  (로컬 SQLite — transcript 미러. 함수 안에서 다시 import 금지: test_import_shadow)
+import mail_alert  # noqa: E402  (메일 알림 설정 — 능동 알림 루프와 명령이 함께 본다)
 from dblog import log  # noqa: E402  (시각을 붙여 준다. 정의는 dblog.py 한 곳)
 
 
@@ -179,6 +180,51 @@ _LONG_RUN: list[float] = []
 # 동백에게 하는 말로 본다 — 방금 동백이 말을 걸었기 때문이다 (사장님 지시).
 _REPLIED_AT = {"at": 0.0, "who": ""}   # who: 이 대화창을 연 사람 (H2 다자간)
 
+# 마지막으로 "제게 하신 말씀이 아니군요" 라고 답한 시각. 이게 _REPLIED_AT
+# 보다 나중이면 대화창을 열지 않는다.
+_DISOWNED = {"at": 0.0}
+
+# 마지막으로 "목소리 확인이 안 돼서 못 받았어요" 라고 되물은 시각.
+_RETRY_TOLD = {"at": 0.0}
+
+
+def _retry_notice_due() -> bool:
+    """목소리를 못 알아봤다고 되묻는다. 잇따른 되물음은 삼킨다.
+
+    ⚠ 되물음은 스스로 재시도 창(REPLY_FOLLOWUP_SEC)을 연다. 그래서 다음
+      소리가 창 밖 방송이었어도 창 안이 되고, 또 되묻고, 또 창이 열린다 —
+      되물음이 되물음을 부르는 고리다. 실측 2026-08-15 19:55: TV 드라마
+      (이혼소송 장면)에 대고 9초·19초 간격으로 세 번 연달아 되물었다.
+      실측 되물음 94건 중 21건이 이 고리였다.
+    ⚠ 되물음 자체는 안 끈다 — 94건 중 38건은 뒤이어 명령이 통과했다.
+      삼키는 건 '두 번째부터' 이고, 그때 사장님은 이미 같은 말을 들으셨다.
+      창은 그대로 열어 둔다 (다시 말씀하시면 받아야 한다). 입만 다문다.
+    """
+    now = time.monotonic()
+    if now - _RETRY_TOLD["at"] < getattr(
+            config, "VOICE_RETRY_NOTICE_COOLDOWN_SEC", 30.0):
+        return False
+    speak.say("목소리 확인이 안 돼서 못 받았어요. 한 번만 다시 말씀해 주세요.",
+              block=False, priority=speak.PRIORITY_NOTICE)
+    _RETRY_TOLD["at"] = now
+    return True
+
+
+def _reply_window_until() -> float:
+    """답변 직후 대화창(호출어 면제)이 열려 있는 끝 시각.
+
+    ⚠ 방금 한 답이 "제게 하신 말씀이 아니군요" 였으면 창은 없다. 소리를
+      냈다는 사실만으로 창이 열리면(speak.last_finished_at) 물러나 놓고
+      도로 끼어드는 꼴이 된다 — 입으로는 "다시 불러주세요" 해놓고.
+      2026-08-14 실측: 그 답이 28건 $30.11, 그날 비용의 4분의 1이었다.
+      푸시투토크 창은 여기서 안 건드린다. 그건 사장님이 버튼으로 명시하신
+      것이라 오인이 없다.
+    """
+    if _DISOWNED["at"] > _REPLIED_AT["at"]:
+        return 0.0
+    return (max(_REPLIED_AT["at"], speak.last_finished_at())
+            + getattr(config, "REPLY_FOLLOWUP_SEC", 0.0))
+
 # 미팅 모드 (2026-08-13 사장님 지시) — 입 봉인 + 기록 + 클로드 회의록.
 #
 # GPT 모드(2026-08-14 지시)도 같은 기계를 쓴다. "지피티와 대화하는 동안
@@ -227,13 +273,17 @@ def _meeting_exit(reason: str) -> None:
     threading.Thread(target=_work, daemon=True).start()
 
 
-def _phone_enter(reason: str) -> None:
+def _phone_enter(reason: str, *, owner: bool = False) -> None:
     """전화 모드 — 미팅 모드와 같은 원칙으로 입을 봉인한다.
 
     사장님 지시(2026-08-13): "전화통화나 회의모드일 때는 스피커로 얘기하지
     말고, 무음으로 알아서 정리해." 그 전까지는 통화 중에도 원거리 알림·
     타이머가 소리로 새어 나갔다.
+
+    owner — 들어오는 계기가 등록 화자 확인을 이미 통과했는가
+    ("여보세요", "전화 모드로 해"). 나갈 때 위키에 남길지의 근거가 된다.
     """
+    call_notes.mark_owner(owner)
     _HOLD["until"] = time.monotonic() + config.PHONE_HOLD_SEC
     _HOLD["last_heard"] = time.monotonic()
     speak.mute(True)
@@ -253,6 +303,20 @@ def _phone_exit(reason: str, *, summarize: bool = True) -> None:
     speak.mute(False)
     log(f"전화 모드 해제 ({reason})")
     if summarize and call_notes.pending() >= 3:
+        # ⚠ 사장님 목소리가 한 번도 안 섞였으면 통화가 아니라 방송이다.
+        #   2026-08-14 18:35 '그것이 알고싶다' 류 재연 방송이 "통화 자동
+        #   정리" 로 위키에 들어갔다 (15:12 재혼 이야기도 같은 건).
+        #   전화 모드 진입 자체는 안 건드린다 — 그쪽은 무음이 되는 방향이라
+        #   조이는 게 안전하다. 손대는 곳은 '남길지' 하나다.
+        #   화자 인증이 꺼져 있거나 등록 지문이 없으면 _speaker_ok 가 늘
+        #   통과라 이 조건도 늘 참이다 (예전 동작 그대로).
+        if not call_notes.owner_heard():
+            n_drop = call_notes.pending()
+            call_notes.drop("사장님 목소리 없음")
+            log(f"통화 자동 정리 건너뜀 — 사장님 목소리가 한 번도 안 섞였습니다 "
+                f"({n_drop}조각, 방송으로 봄). 원문은 state 에 남겼습니다")
+            return
+
         def _work():
             said, path = call_notes.save()
             log(f"통화 자동 정리: {said[:70]}" + (f" → {path.name}" if path else ""))
@@ -766,21 +830,37 @@ def _nudge_loop() -> None:
                         except Exception:
                             pass
 
-            # VIP 메일 — 목록이 비어 있으면 아예 안 돈다 (osascript 도 아낀다)
-            if config.MAIL_NUDGE_VIP and time.monotonic() >= next_mail:
+            # 메일 알림 — 무엇을 알릴지는 mail_alert 가 정한다 (사장님 지시
+            # 2026-08-16 "메일 들어오면 알려줘"). 예전엔 VIP 목록이 비어 있으면
+            # 아예 안 돌았고, 그 목록이 실제로 비어 있어 한 번도 울린 적이 없다.
+            if mail_alert.mode() != mail_alert.OFF and time.monotonic() >= next_mail:
                 next_mail = time.monotonic() + config.MAIL_NUDGE_CHECK_SEC
                 import mail_local
 
+                first_pass = not seen_mail
                 for m in (mail_local.received_brief(hours=1, max_scan=10) or []):
                     key = m["from"] + "|" + m["subject"]
                     if key in seen_mail:
                         continue
                     seen_mail.add(key)
-                    hay = (m["from"] + m["subject"]).lower()
-                    if any(v.lower() in hay for v in config.MAIL_NUDGE_VIP):
-                        line = f"{m['from']} 님 메일이 왔습니다. {m['subject'][:40]}"
-                        log(f"VIP 메일 알림: {line}")
-                        speak.say(line, block=False)
+                    # ⚠ 처음 도는 판은 알리지 않는다. 데몬을 띄운 순간 지난
+                    #   한 시간치가 전부 '새 메일' 로 보여 한꺼번에 쏟아진다.
+                    if first_pass:
+                        continue
+                    if not mail_alert.should_alert(m["from"], m.get("addr", ""),
+                                                   m["subject"]):
+                        continue
+                    said = mail_alert.line(m["from"], m["subject"])
+                    log(f"메일 알림({mail_alert.mode()}): {said}")
+                    speak.say(said, block=False)
+                    # 밖에 계실 때는 소리가 소용없다 — 폰으로도 보낸다.
+                    try:
+                        import briefing
+
+                        briefing._to_telegram("📬 새 메일",
+                                              f"{m['from']}\n{m['subject']}")
+                    except Exception:
+                        pass
         except Exception as e:
             log(f"능동 알림 오류: {type(e).__name__}: {e}")
 
@@ -840,8 +920,16 @@ def _run_jobs() -> None:
                     # 창 주인도 함께 적는다 — 다른 분 말씀은 이 창을 못 쓴다 (H2).
                     # (텔레그램 미러는 record() 가 한다 — 2026-08-13 부터
                     #  '대답한 것 전부' 로 넓히면서 기록소 한 곳으로 모았다)
-                    _REPLIED_AT["at"] = time.monotonic()
-                    _REPLIED_AT["who"] = job.get("who", "")
+                    #
+                    # ⚠ 단, "저한테 하신 말씀이 아닌 것 같아요" 라고 답했으면
+                    #   창 대신 물러난 시각을 적는다 (_reply_window_until 참고).
+                    if (getattr(config, "DISOWN_CLOSES_WINDOW", True)
+                            and router.is_disown_reply(delivered)):
+                        _DISOWNED["at"] = time.monotonic()
+                        log("제게 한 말이 아니라고 답함 — 대화창은 안 연다")
+                    else:
+                        _REPLIED_AT["at"] = time.monotonic()
+                        _REPLIED_AT["who"] = job.get("who", "")
             # 말이 끝난 뒤에 갈아탄다. 먼저 재시작하면 답이 잘린다.
             restart_if_pending()
         except Exception as e:                     # 실행기는 죽으면 안 된다
@@ -1295,14 +1383,22 @@ def record(**fields) -> None:
     if os.path.basename(sys.argv[0] or "").startswith("test_"):
         return
     fields["ts"] = datetime.now().isoformat(timespec="seconds")
-    try:
-        with config.TRANSCRIPT_LOG.open("a") as f:
-            f.write(json.dumps(fields, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
-    # 로컬 DB 미러 (2026-08-13, PLAN-unify 2단계). 실패는 조용히 —
-    # 원본은 위 jsonl 이고, DB 가 없다고 명령 처리가 멎으면 본말전도다.
-    dbstore.save(fields)
+    # 정본은 DB 다 (사장님 지시 2026-08-16 "db를 정본으로 해").
+    #
+    # 전에는 jsonl 에 먼저 쓰고 DB 에 미러했다. 같은 것이 두 곳에 쌓이면
+    # 갈라지는 날 어느 쪽이 사실인지 가릴 근거가 없다. 읽는 쪽은 전부
+    # dbstore 로 옮겼고, 이제 쓰는 곳도 한 곳이다.
+    #
+    # ⚠ 다만 기록을 통째로 잃지는 않는다. DB 가 실패한 건만 jsonl 에
+    #   구명정으로 적는다 — 평소엔 그 파일에 한 줄도 안 늘어난다.
+    #   줄이 생겼다면 DB 가 아팠다는 뜻이고, 그 자체가 신호다.
+    if not dbstore.save(fields):
+        log("⚠ DB 기록 실패 — transcript.jsonl 로 흘려둡니다")
+        try:
+            with config.TRANSCRIPT_LOG.open("a") as f:
+                f.write(json.dumps(fields, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
     # 대답한 것은 전부 텔레그램에도 남는다 (사장님 지시 2026-08-13
     # "대답한 로그는 모두 텔레그램으로"). 전에는 음성 경로만 미러라
     # 직접 발화(통화 정리 등)·HTTP 답변이 폰에 안 남았다.
@@ -1366,19 +1462,42 @@ def _not_for_me_reply() -> str:
     return "네, 제게 하신 말씀이 아니군요. 조용히 있겠습니다."
 
 
-# 멀리 계신 걸 알아챈 상태 — 마지막 증폭 배수와 안내 시각.
-_FAR = {"gain": 0.0, "at": 0.0, "told": 0.0}
+# 멀리 계신 걸 알아챈 상태 — 마지막 증폭 배수·원본 크기와 안내 시각.
+_FAR = {"gain": 0.0, "rms": 0.0, "at": 0.0, "told": 0.0}
+
+
+def _far_heard(rms: float, gain: float) -> None:
+    """증폭이 걸렸다 — 로그와 상태만 남긴다 (audio 층이 부른다).
+
+    ⚠ 여기서는 말하지 않는다. 이 시점엔 방금 잡은 소리가 사장님 말씀인지
+      TV 소리인지 whisper 의 환청인지 아직 모른다 — 받아쓰기도 화자 확인도
+      뒤에 온다. 실측 08-13~16 안내 107번 중 78번이 그 뒤 '미등록·무시' 로
+      버려진 소리였고, 그중 다섯 번은 자정~새벽 2시였다. 아무도 안 부른
+      빈 방에 대고 "멀리 계신 것 같아요" 라고 말한 셈이다.
+      "방송에 대고 떠들면 그게 더 소음" 이라는 원칙은 이 안내에도 같다.
+    """
+    log(f"먼 소리 증폭 {gain:.1f}배 (원본 {rms:.4f})")
+    _FAR["gain"], _FAR["rms"], _FAR["at"] = gain, rms, time.monotonic()
+
+
+def _far_notice_due() -> None:
+    """방금 들은 말이 등록 화자로 확인됐다 — 아까 증폭이 걸렸으면 이제 알린다.
+
+    증폭 시점과 여기 사이에는 받아쓰기가 끼어 몇 초가 흐른다. 묵은 증폭까지
+    되살리지 않도록 방금(15초) 것만 본다.
+    """
+    if _FAR["at"] and time.monotonic() - _FAR["at"] <= 15.0:
+        _on_far_gain(_FAR["rms"], _FAR["gain"])
 
 
 def _on_far_gain(rms: float, gain: float) -> None:
-    """증폭이 걸렸다. 로그에 남기고, 처음이면 말로도 알린다.
+    """멀리 계신 걸 말로 알린다 — 사장님 말씀인 게 확인된 뒤에만 부른다.
 
     사장님이 "동백이 내가 멀리 있는 걸 아는지" 확인할 수 있어야 한다는
     지시(2026-08-13). 로그만으로는 그걸 알 수 없다.
     ⚠ 안내는 알림(NOTICE) 우선순위 — 답변을 끊지 않는다. 그리고 쿨다운을
       둔다. 멀리 계시는 내내 매 발화마다 말하면 그게 소음이다.
     """
-    log(f"먼 소리 증폭 {gain:.1f}배 (원본 {rms:.4f})")
     _FAR["gain"], _FAR["at"] = gain, time.monotonic()
     if not getattr(config, "FAR_NOTICE_ENABLED", False):
         return
@@ -1388,6 +1507,7 @@ def _on_far_gain(rms: float, gain: float) -> None:
     if now - _FAR["told"] < getattr(config, "FAR_NOTICE_COOLDOWN_SEC", 600.0):
         return
     _FAR["told"] = now
+    log(f"멀리 계신다고 알림 ({gain:.1f}배, 원본 {rms:.4f})")
     speak.say(config.FAR_NOTICE_TEXT, block=False, priority=speak.PRIORITY_NOTICE)
 
 
@@ -1980,7 +2100,7 @@ def run_daemon() -> int:
         # 였는지 이 줄로 갈린다 (2026-08-13 '크기가' 사고).
         import audio as _audio_mod
 
-        _audio_mod.set_gain_reporter(_on_far_gain)
+        _audio_mod.set_gain_reporter(_far_heard)
         # "내 목소리 잘 들려?" 를 router 가 받아 이 함수로 답한다
         # (router → dongbaek 직접 import 는 순환이라 꽂아 준다).
         router.set_far_status(far_status)
@@ -2009,6 +2129,8 @@ def run_daemon() -> int:
         nearmiss_until = 0.0
         # 직전에 처리한 명령. 답변 도중에 말을 보태시면 여기에 이어 붙인다.
         _last_command, _last_command_at = "", 0.0
+        # 그 버퍼에 지금까지 몇 번 붙었나. 눈덩이를 세는 자다.
+        _merge_count = 0
         while True:
             # timeout 을 두는 이유: 푸시투토크 요청이 들어왔는지
             # 주기적으로 확인해야 하기 때문
@@ -2079,7 +2201,16 @@ def run_daemon() -> int:
                 #   사장님께는 "동백 준비되었습니다" 가 반복되는 걸로 보였다.
                 #   모듈 맨 위의 import 로 충분하다.
                 try:
-                    call_notes.note(text)
+                    # 사장님 목소리가 섞였는지도 같이 적어 둔다 — 나갈 때
+                    # 이걸 보고 위키에 남길지 정한다 (방송 오인 방지).
+                    # 한 번 확인되면 더 안 본다: 답은 이미 나왔고, 통화
+                    # 내내 지문 검사를 돌릴 이유가 없다.
+                    # ⚠ bank=False — 통화 상대 목소리를 '남' 지문으로 쌓으면
+                    #   코호트가 통화 한 통에 뒤덮인다. 여기 판정은 '남길지'
+                    #   에만 쓰고 문을 여닫지 않으므로 담을 이유가 없다.
+                    mine = (call_notes.owner_heard()
+                            or _speaker_ok(audio, bank=False)[0])
+                    call_notes.note(text, owner=mine)
                 except Exception:
                     pass
                 _HOLD["last_heard"] = time.monotonic()   # 30초 무음 판정용
@@ -2153,8 +2284,7 @@ def run_daemon() -> int:
             # 재면 긴 답변일수록 사장님께 남는 시간이 줄어든다 — 10초짜리
             # 답변이면 15초 창에서 5초만 남는다. 사장님 지적: "내가 또 거기에
             # 대해서 대답을 하면 또 말이 없어. 두 마디 연결이 안 돼."
-            reply_win = (max(_REPLIED_AT["at"], speak.last_finished_at())
-                         + getattr(config, "REPLY_FOLLOWUP_SEC", 0.0))
+            reply_win = _reply_window_until()
             if getattr(config, "REQUIRE_WAKE_ALWAYS", False):
                 free_pass = spoke_at < max(state["ptt_until"], reply_win)
             else:
@@ -2190,6 +2320,24 @@ def run_daemon() -> int:
             #   옮긴다(18밀리초). 대화창이 열려 있고 사장님 목소리면 그건
             #   통화가 아니라 대화다 — 집계에도 넣지 않는다(넣으면 다음
             #   긴 말씀에서 또 걸린다).
+            # 캘린더에 회의가 잡혀 있는 시간대라면, 긴 말 **한 번**이면
+            #   미팅이다. 두 번을 기다릴 이유가 없다 — 일정이 이미 그렇다고
+            #   말하고 있고, 미팅 모드는 더 굳게 닫히는 쪽이라 늦게 들어갈수록
+            #   앞부분이 새어 나간다. 실측: 미팅 모드가 켜진 흔적은 사흘 통틀어
+            #   19번뿐이었다. 회의 중에 켜지지 않으면 있으나 마나다.
+            if (len(text) >= config.CALL_DETECT_CHARS
+                    and getattr(config, "MEETING_MODE_ENABLED", False)
+                    and getattr(config, "MEETING_AUTO_FROM_CALENDAR", False)
+                    and router.match_wake(text) is None
+                    and not _HOLD["until"] and not _meeting_active()
+                    and _calendar_meeting_now()):
+                ok_mt, _why_mt = _speaker_ok(audio)
+                if ok_mt:
+                    call_notes.note(text)
+                    _meeting_enter(f"캘린더 일정 중 긴 말 ({len(text)}자)")
+                    followup_until = 0.0
+                    continue
+
             if len(text) >= config.CALL_DETECT_CHARS:
                 in_dialog = False
                 if free_pass and router.match_wake(text) is None:
@@ -2198,6 +2346,22 @@ def run_daemon() -> int:
                         in_dialog = True
                         log(f"대화 중 긴 말씀 ({len(text)}자, 목소리 확인) "
                             f"— 통화로 세지 않음")
+                # ⚠ 통화의 증거는 '긴 소리' 가 아니라 '사장님이 길게 말씀하시는
+                #   것' 이다. 통화 중이면 말하는 사람은 사장님이다.
+                #
+                #   길이만 세면 TV 가 전화 모드를 켠다. 실측 2026-08-15,
+                #   자동 진입 70회 중 3회는 바로 앞이 '미등록 목소리' 였고
+                #   46회는 화자를 보지도 않았다. 그렇게 귀를 닫으면 최장
+                #   11.2분(중앙값 105초) 동안 사장님이 두 번 불러야 열린다.
+                #
+                #   남 목소리는 어차피 발화 하나하나가 무시된다. 무시되는
+                #   소리 때문에 귀까지 닫을 이유가 없다.
+                if not in_dialog and getattr(config, "CALL_DETECT_OWNER_ONLY", True):
+                    ok_l, why_l = _speaker_ok(audio)
+                    if not ok_l:
+                        log(f"긴 소리지만 사장님 목소리가 아님(유사도 {why_l}) "
+                            f"— 통화로 세지 않음 ({len(text)}자)")
+                        in_dialog = True      # 집계에서 뺀다
                 if not in_dialog:
                     now_m = time.monotonic()
                     _LONG_RUN[:] = [t0 for t0 in _LONG_RUN
@@ -2265,7 +2429,9 @@ def run_daemon() -> int:
                     if router.is_bare_hold(router.normalize(text)):
                         ok_h, _ = _speaker_ok(audio)
                         if ok_h:
-                            _phone_enter(f"자동: {text[:20]!r}")
+                            # 목소리 확인을 통과한 "여보세요" 다 — 사장님이
+                            # 전화를 받으신 게 확실하니 통화로 인정하고 시작한다.
+                            _phone_enter(f"자동: {text[:20]!r}", owner=True)
                             continue
                     # 호출어가 아니어도 '비슷하게' 들렸으면 되묻는다.
                     # 조용히 버리면 사장님은 고장난 줄 안다. ('홍배가' 실제 사례)
@@ -2310,6 +2476,8 @@ def run_daemon() -> int:
                 # 빈 주인은 판정하지 않으므로 지금까지와 같다.
                 ok_w, who_w = _speaker_ok(audio)
                 _REPLIED_AT["who"] = who_w if ok_w else ""
+                if ok_w:
+                    _far_notice_due()
                 if _HOLD["until"]:            # 전화 모드였어도 부르셨으면 연다
                     _phone_exit("말끝 호명")
                 followup_until = time.monotonic() + config.FOLLOWUP_WINDOW_SEC
@@ -2340,6 +2508,9 @@ def run_daemon() -> int:
                 # 부른 사람이 새 창의 주인 (H2) — 못 알아보면 비워 둔다.
                 ok_c, who_c = _speaker_ok(audio)
                 _REPLIED_AT["who"] = who_c if ok_c else ""
+                if ok_c:
+                    _far_notice_due()
+                    _RETRY_TOLD["at"] = 0.0   # 통과했으니 되물음 고리는 끊겼다
                 followup_until = time.monotonic() + config.FOLLOWUP_WINDOW_SEC
                 continue
 
@@ -2371,11 +2542,15 @@ def run_daemon() -> int:
                 # 08:45 "동백아 감사합니다" 가 0.27 로 조용히 무시돼
                 # "3번 불러야 대답한다" 가 됐다. 부르셨는데 침묵은 고장이다.
                 if (in_window and ambiguous) or woke:
-                    speak.say("목소리 확인이 안 돼서 못 받았어요. 한 번만 "
-                              "다시 말씀해 주세요.",
-                              block=False, priority=speak.PRIORITY_NOTICE)
+                    _retry_notice_due()          # 잇따른 되물음은 삼킨다
                     _REPLIED_AT["at"] = time.monotonic()
                 continue
+
+            # 사장님 말씀인 게 확인됐다 — 아까 증폭이 걸렸으면 여기서 알린다.
+            _far_notice_due()
+            # 목소리가 통과했으니 되물음 고리는 끊겼다. 다음에 또 막히면
+            # 그건 새 사건이라 쿨다운을 기다리지 않고 알린다.
+            _RETRY_TOLD["at"] = 0.0
 
             # H2 다자간 — 호출어 면제 창은 그 창을 연 사람의 것이다.
             # 다른 등록 화자는 자기 호출어로 시작해야 한다 (홍길동 창에
@@ -2409,7 +2584,77 @@ def run_daemon() -> int:
             # 전에는 이 말이 클로드로 가서 $0.22 를 쓰고 쓸모없는 확인 답변이
             # 돌아왔다. 사장님 지적(2026-08-12): "전화 끝났어 하면 '네
             # 알겠습니다' 아니면 '통화 내용은 뭐였는데요? 요약 정리하겠습니다'
-            # 이렇게 나와야지."
+            # 메일 알림 켜고 끄기 — 로컬에서 0초에 끝난다.
+            #
+            # ⚠ 이걸 클로드로 보내면 안 된다. 사장님이 "메일 들어오면 알려줘"
+            #   하셨을 때 나온 답이 "도구가 없어서 안 된다" 였다 (2026-08-16).
+            #   기능은 있었고 꺼져 있었을 뿐인데, 설정을 만질 길이 없으니
+            #   클로드가 제 도구 목록만 보고 없다고 답한 것이다.
+            _mail_mode = router.mail_alert_intent(command)
+            if _mail_mode:
+                # 누구를 기다리시는지 말씀하셨으면 그것부터 적는다.
+                # 실사례 2026-08-16 12:58 — "강남 한빛건설에서 메일 온 거 없어?
+                # 조만간 30분 이내 올 거니까 오는 대로 바로 알림 줘."
+                _who = router.mail_watch_target(command)
+                if _who and _mail_mode != "끔":
+                    mail_alert.watch_add(_who)
+                    said = f"{_who} 메일 오면 바로 알려드릴게요. 5분마다 봅니다."
+                    log(f"메일 기다림 추가: {_who}")
+                    speak.say(said, block=False)
+                    _REPLIED_AT["at"] = time.monotonic()
+                    record(source="voice", heard=text, command=command,
+                           route="local", reply=said, effective_input=0, cost_usd=0)
+                    followup_until = time.monotonic() + config.FOLLOWUP_WINDOW_SEC
+                    continue
+                if _mail_mode == "끔":
+                    mail_alert.watch_clear()
+                now_mode = mail_alert.set_mode(_mail_mode)
+                said = {
+                    "끔": "메일 알림을 껐어요.",
+                    "vip": "중요한 발신만 알려드릴게요.",
+                    "사람": "사람이 보낸 메일이 오면 알려드릴게요. "
+                            "서비스 알림은 빼고요.",
+                    "전부": "메일이 오면 전부 알려드릴게요.",
+                }.get(now_mode, "메일 알림을 바꿨어요.")
+                log(f"메일 알림 설정: {now_mode}")
+                speak.say(said, block=False)
+                _REPLIED_AT["at"] = time.monotonic()
+                record(source="voice", heard=text, command=command,
+                       route="local", reply=said, effective_input=0, cost_usd=0)
+                followup_until = time.monotonic() + config.FOLLOWUP_WINDOW_SEC
+                continue
+
+            # 정리 끝에 여쭤 둔 일정 후보가 있으면, 승인 한마디로 넣는다.
+            #
+            # ⚠ 여기가 '바로 등록' 을 대신하는 자리다. 통화 받아쓰기는 메일보다
+            #   험해서 그대로 넣으면 캘린더가 더러워진다 — 2026-08-15 에 그렇게
+            #   생긴 56건을 지웠다. 뽑아 두고 한마디를 받는다.
+            # ⚠ 후보가 있을 때만 '네' 를 승인으로 읽는다. 평소의 '네' 까지
+            #   승인으로 보면 엉뚱한 것이 들어간다. 30분이 지나면 후보는
+            #   스스로 사라진다.
+            if call_notes.has_pending() and router.is_confirmation(command):
+                import calendar_local
+
+                events, src = call_notes.take_events()
+                done = []
+                for ev in events:
+                    try:
+                        when = datetime.fromisoformat(ev["when"])
+                    except (ValueError, KeyError):
+                        continue
+                    if calendar_local.create(ev["title"], when,
+                                             float(ev.get("hours") or 1.0)):
+                        done.append(ev["title"])
+                said = (f"{len(done)}건 등록했어요. " + ", ".join(done[:3])
+                        if done else "등록할 일정이 남아 있지 않네요.")
+                log(f"{src} 일정 후보 등록: {len(done)}/{len(events)}건")
+                speak.say(said, block=False)
+                _REPLIED_AT["at"] = time.monotonic()
+                record(source="voice", heard=text, command=command,
+                       route="local", reply=said, effective_input=0, cost_usd=0)
+                followup_until = time.monotonic() + config.FOLLOWUP_WINDOW_SEC
+                continue
+
             if call_notes.is_end_call(router.normalize(command)):
                 if _HOLD["until"]:            # 전화 모드였으면 푼다 —
                     # 정리는 아래에서 직접 말로 하므로 자동 정리는 끈다
@@ -2479,7 +2724,9 @@ def run_daemon() -> int:
             if router.is_hold_request(router.normalize(command)):
                 # 안내는 봉인 '전에' 큐에 넣는다 — 이미 큐에 든 말은 나간다.
                 speak.say("네, 전화 끝나면 다시 들어라고 해주세요.", block=False)
-                _phone_enter("명령")
+                # 사장님이 직접 시키신 것이다 (이 자리는 화자 확인을 이미
+                # 지났다) — 통화가 맞으니 정리해 남긴다.
+                _phone_enter("명령", owner=True)
                 record(source="voice", heard=text, command=command,
                        route="local", reply="전화 모드", effective_input=0, cost_usd=0)
                 continue
@@ -2498,14 +2745,30 @@ def run_daemon() -> int:
             if router.is_stop_speaking(command):
                 speak.stop()
                 bump_generation()          # 처리 중이던 앞 답도 버린다
-                _last_command, followup_until = "", 0.0
+                _last_command, followup_until, _merge_count = "", 0.0, 0
                 log(f"정지 요청 — 읽던 것을 멈춥니다: {command[:30]!r}")
                 continue
 
+            merged_now = False
             if (config.MERGE_ON_INTERRUPT and _last_command
                     and (was_barge or is_busy())
                     and time.monotonic() - _last_command_at < config.MERGE_WINDOW_SEC):
                 merged = f"{_last_command} {command}"
+                # ⚠ 목소리와 무관한 두 문턱. 아래 화자 검사보다 '앞' 이어야
+                #   한다 — 뚫린 곳이 바로 그 화자 예외였다. 넘으면 붙이지
+                #   않고 버퍼를 비운다. 버리는 게 아니라 이번 말만 새 명령으로
+                #   시작하는 것이다.
+                if len(merged) > config.MERGE_MAX_CHARS:
+                    log(f"보탠 말이 상한을 넘음 ({len(merged)}자 > "
+                        f"{config.MERGE_MAX_CHARS}) — 합치지 않고 새로 시작")
+                    _last_command, _last_command_at, _merge_count = "", 0.0, 0
+                elif _merge_count >= config.MERGE_MAX_COUNT:
+                    log(f"한 버퍼에 {_merge_count}번 붙었음 — 그만 붙이고 "
+                        f"새로 시작: {command[:30]!r}")
+                    _last_command, _last_command_at, _merge_count = "", 0.0, 0
+                else:
+                    merged_now = True
+            if merged_now:
                 # ⚠ 합치면 길어진다. 호출어 없이 시작한 말이 상한을 넘으면
                 #   합치지 않고 통째로 버린다 — 통화 소리가 앞 명령에 계속
                 #   달라붙어 매번 클로드로 가던 그 경로다 (실측 20:25).
@@ -2519,12 +2782,13 @@ def run_daemon() -> int:
                     if not ok_m:
                         log(f"보탠 말이 너무 길고 남 목소리(유사도 {why_m}) "
                             f"— 버림 ({len(merged)}자)")
-                        _last_command, followup_until = "", 0.0
+                        _last_command, followup_until, _merge_count = "", 0.0, 0
                         _LONG_RUN.append(time.monotonic())
                         continue
                     log(f"보탠 말이 길지만 사장님 목소리 ({len(merged)}자) — 받습니다")
                 log(f"말을 보태심 — 앞 명령과 합쳐 다시 묻는다: {_last_command[:30]!r}")
                 command = merged
+                _merge_count += 1
                 speak.stop()
                 bump_generation()
 
@@ -2540,12 +2804,50 @@ def run_daemon() -> int:
                 if not ok_nw:
                     log(f"호출어 없이 너무 길고 남 목소리(유사도 {why_nw}) "
                         f"— 버림 ({len(command)}자): {command[:30]!r}")
-                    _last_command, followup_until = "", 0.0
+                    _last_command, followup_until, _merge_count = "", 0.0, 0
                     continue
-                log(f"호출어 없이 길지만 사장님 목소리 ({len(command)}자) — 받습니다")
+                # ⚠ 사장님 목소리인 것만으로는 모자라다. 남과 대화하실 때도
+                #   사장님 목소리다 — 화자로는 '누가 말했나' 만 알지 '누구에게
+                #   한 말인가' 는 모른다. 2026-08-14 18:04 사고가 그 구멍으로
+                #   들어왔다: 옆 대화가 300자짜리 명령이 되어 음소거가 걸렸고
+                #   13시간 소리가 꺼져 있었다.
+                #
+                #   그래서 하나 더 본다 — 시키는 말로 끝나는가.
+                #   동백에게 하는 말은 결국 뭘 시키므로 요청 어미로 끝난다.
+                #   옆 사람과의 대화는 서술·질문이 섞이다 아무렇게나 끝난다.
+                #
+                #   실측(transcript 전량): 호출어 없이 120자 넘는 84건 중
+                #   83건이 여기서 걸린다. 49종을 눈으로 확인했고 전부 통화·
+                #   잡담·TV 였다 — 정당한 지시는 한 건도 섞이지 않았다.
+                #   2026-08-16: 이 판단을 router.is_for_me 로 옮겼다. 하는 일은
+                #   같되 두 가지가 엄해졌다 — 시키는 말을 **문장 끝에서만**
+                #   보고(한가운데의 '해줘' 는 남에게 한 부탁이다), 남에게 하는
+                #   말의 표시(전언·타인 호칭·맞장구)도 함께 본다.
+                #   실측 시험대: tools/eval_intrusion.py
+                if not router.is_for_me(command):
+                    log(f"호출어 없이 길고 나에게 한 말도 아님 — 버림 "
+                        f"({len(command)}자): {command[:30]!r}")
+                    _last_command, followup_until, _merge_count = "", 0.0, 0
+                    continue
+                log(f"호출어 없이 길지만 사장님이 시키는 말 ({len(command)}자) — 받습니다")
+
+            # ⚠ 짧은 말에도 '남에게 한 말' 표시는 있다 — "여보, 그거 어딨어?",
+            #   "형님 그러시더라고", "그렇죠?". 위 관문은 길이가 넘을 때만
+            #   보므로 이런 건 그대로 통과해 대답이 나갔다. 대화창이 열려
+            #   있으면 더 잘 통과한다.
+            #
+            #   호출어로 부르신 말은 여기서 보지 않는다 — 부르셨으면 나에게
+            #   하신 말이 맞고, 그 판단을 낱말로 뒤집으면 안 된다.
+            if not woke and not router.is_for_me(command):
+                log(f"나에게 한 말로 보이지 않음 — 가만히 있습니다: {command[:40]!r}")
+                _last_command, followup_until, _merge_count = "", 0.0, 0
+                continue
 
             _last_command = command
             _last_command_at = time.monotonic()
+            # 붙여서 만든 말이 아니면 눈덩이 계수를 처음으로 되돌린다.
+            if not merged_now:
+                _merge_count = 0
             log(f"명령: {command!r}")
             # 폰에 먼저 띄운다. 답은 나오는 대로 이 메시지를 채운다.
             threading.Thread(target=_mirror_open, args=(command,),
@@ -2579,7 +2881,22 @@ def run_daemon() -> int:
             if gated and not confirm_by_voice(listener, command, hit):
                 record(source="voice", heard=text, command=command,
                        route="blocked", danger=hit, confirmed=False, reply="")
-                followup_until = time.monotonic() + config.FOLLOWUP_WINDOW_SEC
+                # ⚠ 거절당한 말은 죽은 말이다. 버퍼에 남겨두면 다음에 들린
+                #   소리가 여기에 달라붙어(MERGE_ON_INTERRUPT) 같은 위험
+                #   명령을 처음부터 다시 물어본다.
+                #
+                #   2026-08-15 21:55~21:57 실사례. TV 를 켜둔 거실에서
+                #   "이거 비밀번호가 뭐더라" 가 버퍼에 남아, 그 뒤에 들린
+                #   "유튜브 뭐야?"·"로그인을 바꾸자"·"그냥 조용히 있어?" 가
+                #   차례로 붙으며 네 번 되살아났다. 사장님은 "아니 하지마",
+                #   "그냥 조용히 있으라고" 하며 네 번 거절하셨는데 네 번 다시
+                #   물었다. 게이트는 제 일을 했지만 거절이 기억되지 않았다.
+                #
+                #   이어말 창도 닫는다. 거절 직후에는 호출어를 다시 받는 게
+                #   맞다 — 거절한 말에 무언가 이어 붙는 건 대개 그 말이
+                #   동백에게 한 말이 아니었다는 뜻이다.
+                _last_command, _last_command_at, _merge_count = "", 0.0, 0
+                followup_until = 0.0
                 continue
 
             # 실행은 넘기고 곧바로 다시 듣는다.
@@ -2602,16 +2919,7 @@ _ROUTE_MARK = {
 
 def show_log(n: int) -> int:
     """동백이 무슨 일을 했는지 사람이 읽을 수 있게 출력."""
-    if not config.TRANSCRIPT_LOG.exists():
-        print("아직 기록이 없습니다. 데몬을 띄우고 명령을 한 번 내려보세요.")
-        return 0
-
-    rows = []
-    for line in config.TRANSCRIPT_LOG.read_text(encoding="utf-8").splitlines():
-        try:
-            rows.append(json.loads(line))
-        except ValueError:
-            continue
+    rows = dbstore.rows()
     if not rows:
         print("아직 기록이 없습니다.")
         return 0
@@ -2642,7 +2950,7 @@ def show_log(n: int) -> int:
     local = sum(1 for r in rows if r.get("route") == "local")
     print(f"누적 — 총 {len(rows)}건 / 로컬처리 {local}건(0원) / 차단 {blocked}건")
     print(f"누적 비용 약 {total_cost * 1400:,.0f}원  (${total_cost:.2f})")
-    print(f"\n원본: {config.TRANSCRIPT_LOG}")
+    print(f"\n원본: {dbstore.DB_PATH} (transcript 표)")
     return 0
 
 

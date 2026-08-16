@@ -6,6 +6,10 @@
 못 알아듣는 것보다 나쁘다. 아래 세 건은 실제 기록에서 나온 후보들이다.
     python test_term_learn.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import term_learn
 
 passed = 0
@@ -21,13 +25,13 @@ def check(cond: bool, why: str) -> None:
 print("[1] 조사는 끝까지 뗀다 — 겹쳐 붙는다")
 check(term_learn._strip_particle("동백이가") == "동백", "'동백이가' → '동백'")
 check(term_learn._strip_particle("레일웨이에서") == "레일웨이", "'레일웨이에서' → '레일웨이'")
-check(term_learn._strip_particle("에임") == "에임", "더 떼면 이름이 사라지는 건 안 뗀다")
+check(term_learn._strip_particle("한빛") == "한빛", "더 떼면 이름이 사라지는 건 안 뗀다")
 
 print("\n[2] 배우면 안 되는 짝")
 check(term_learn._is_noise("동백동", "동백") is not None,
       "'동백동'(사장님 동네)은 '동백'으로 안 바꾼다")
-check(term_learn._is_noise("에임", "한빛기획") is not None,
-      "두 글자 앞토막 '에임'은 넘겨짚지 않는다")
+check(term_learn._is_noise("한빛", "한빛기획") is not None,
+      "두 글자 앞토막 '한빛'은 넘겨짚지 않는다")
 check(term_learn._is_noise("광고플랫폼에서", "광고플랫폼") is not None,
       "이름을 제대로 들은 말은 오기가 아니다")
 
@@ -37,7 +41,14 @@ check(term_learn._is_noise("홍배", "동백") is None, "닮은 다른 표기는
 
 print("\n[4] 규칙은 낱말 통째로일 때만 문다")
 import json, re
-raw = json.loads(term_learn.config.TERM_LEARNED_FILE.read_text(encoding="utf-8"))
+# ⚠ 배운 규칙 파일이 없을 수도 있다 — 처음 설치한 사람은 아직 아무것도
+#   배우지 않았다. 그때 예외로 터지면 시험이 '이 맥에서만' 도는 것이 된다.
+#   파일이 없으면 볼 규칙도 없는 것이니 조용히 건너뛴다.
+try:
+    raw = json.loads(term_learn.config.TERM_LEARNED_FILE.read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    raw = {"rules": []}
+    print("  · 배운 규칙이 아직 없습니다 (새 설치) — 건너뜁니다")
 for r in raw.get("rules", []):
     rx = re.compile(r["pattern"])
     check(not rx.search(r["right"]),

@@ -5,6 +5,10 @@ ollama 없이 돈다. gatekeeper._generate 를 몽키패치해 분류·즉답을
 dongbaek.handle 흐름에서 게이트키퍼가 '언제 나서면 안 되는지'를 본다.
     python test_gatekeeper.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import json
 import sys
 

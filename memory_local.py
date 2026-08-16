@@ -23,11 +23,31 @@ DB = Path(getattr(config, "MEMORY_DB", config.STATE / "memory.db"))
 STAMP = config.STATE / "memory_stamp.json"
 
 
-def _embed(text: str) -> np.ndarray | None:
-    """정규화된 임베딩. 실패하면 None."""
+def _embed(text: str, *, query: bool = False) -> np.ndarray | None:
+    """정규화된 임베딩. 실패하면 None.
+
+    ⚠ ollama 를 떠났다 (2026-08-14). 사장님 판단: "임베딩 하나 때문에
+      큐웬을 남겨둘 이유가 없다. 올라마가 아예 관여를 안 하게 하자."
+      embed_local(multilingual-e5-small ONNX)이 이 프로세스 안에서 한다 —
+      4ms, 별도 프로세스 없음. 실측으로 회상 품질은 오히려 올랐다
+      ("회의 일정"·"목소리 인식" 에서 큐웬이 물어오던 무관한 항목이 빠졌다).
+
+    ⚠ e5 는 찾는 말과 저장하는 글에 서로 다른 접두어를 요구한다.
+      query 인자를 빠뜨리면 에러 없이 품질만 떨어지므로, 부르는 쪽이
+      아니라 여기서 갈라 둔다.
+    """
     text = (text or "").strip()
     if not text:
         return None
+    try:
+        import embed_local
+
+        if embed_local.available():
+            return (embed_local.embed_query(text) if query
+                    else embed_local.embed_passage(text))
+    except Exception:
+        pass
+    # 모델이 없으면 옛 경로(ollama)로 내려간다 — 벽돌이 되는 것보다 낫다.
     # 색인은 하루 한 번, 회상도 가끔이다 — 붙들고 있을 이유가 없다.
     payload = {"model": config.MEMORY_EMBED_MODEL, "input": text[:800],
                "keep_alive": getattr(config, "MEMORY_KEEP_ALIVE", "30s")}
@@ -75,7 +95,7 @@ def recall(query: str, k: int = 3,
     """
     if min_sim is None:
         min_sim = getattr(config, "MEMORY_MIN_SIM", 0.35)
-    q = _embed(query)
+    q = _embed(query, query=True)      # 찾는 말 — e5 는 'query:' 접두어를 쓴다
     if q is None:
         return []
     try:
@@ -121,30 +141,29 @@ def index_new() -> int:
     added = 0
 
     # 문답 — 클로드·게이트키퍼 경로만. 시각 조회 따위는 기억 가치가 없다.
+    #
+    # 자리표가 바이트 오프셋('off')에서 DB 행 번호('row_id')로 바뀌었다
+    # (2026-08-16, 정본을 DB 로 옮기며). 옛 자리표만 있는 첫 실행에서는
+    # **지금까지 쌓인 것을 이미 읽은 것으로 친다** — 안 그러면 2,500건을
+    # 통째로 다시 기억에 밀어 넣어 같은 대화가 두 벌이 된다.
     try:
-        size = config.TRANSCRIPT_LOG.stat().st_size
-        start = int(stamp.get("off", 0))
-        if start > size:
-            start = 0
-        with config.TRANSCRIPT_LOG.open("rb") as f:
-            f.seek(start)
-            chunk = f.read().decode("utf-8", "ignore")
-        stamp["off"] = size
-        for line in chunk.splitlines():
-            try:
-                r = json.loads(line)
-            except ValueError:
-                continue
-            if r.get("route") not in ("claude", "gatekeeper"):
-                continue
-            cmd = (r.get("command") or "").strip()
-            rep = (r.get("reply") or "").strip()
-            if len(cmd) < 6 or not rep:
-                continue
-            text = f"사장님: {cmd[:150]} / 동백: {rep[:250]}"
-            if remember("dialog", text, ts=r.get("ts")):
-                added += 1
-    except OSError:
+        import dbstore
+
+        if "row_id" not in stamp:
+            stamp["row_id"] = dbstore.max_id()
+        else:
+            for r in dbstore.rows_after(int(stamp["row_id"])):
+                stamp["row_id"] = r["id"]
+                if r.get("route") not in ("claude", "gatekeeper"):
+                    continue
+                cmd = (r.get("command") or "").strip()
+                rep = (r.get("reply") or "").strip()
+                if len(cmd) < 6 or not rep:
+                    continue
+                text = f"사장님: {cmd[:150]} / 동백: {rep[:250]}"
+                if remember("dialog", text, ts=r.get("ts")):
+                    added += 1
+    except Exception:
         pass
 
     # 업무일지 — 파일 하나가 기억 하나. 요약이 이미 돼 있는 문서다.

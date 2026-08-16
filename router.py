@@ -44,6 +44,18 @@ def _rest_after(text: str, idx_map: list[int], norm_end: int) -> str:
 # 다윗, 다윗.", "동." 같은 것들이 하루에도 여러 번 명령 처리까지 갔다.
 _REPEAT_CHAR = re.compile(r"(.)\1{3,}")          # 같은 글자 4번 이상
 _REPEAT_WORD = re.compile(r"(\b\S{1,3}\b)([ ,.]+\1){2,}")  # 짧은 말 3회 이상
+# 띄어쓰기 없이 통째로 붙어 되풀이되는 꼴 — "HeyHeyHey…", "취소취소취소…",
+# "mişmişmiş…", "etaanetaan…". 위의 두 규칙이 이걸 못 잡았다: 한 글자
+# 반복이 아니고, 사이에 공백·쉼표가 없어 낱말 반복 규칙에도 안 걸린다.
+#
+# ⚠ 놓치면 길이가 부풀어 안전 판단을 흔든다. 실측 2026-08-15 12:35 —
+#   669자짜리 "HeyHey…" 가 '긴 발화' 로 집계돼 전화 모드 진입 표를 던졌다
+#   (100자 × 2회 연속이면 10분 무음). 통화 조각으로도 모여 클로드 정리에
+#   섞였다 (state/call_dropped.jsonl 의 "정취소취소취소…").
+# ⚠ 공백 없는 덩어리만 본다. "200씩 200씩 200씩 200씩" 처럼 띄어 말한
+#   진짜 사람 말까지 잡으면 안 된다 — 들림 로그 6,625건 실측에서
+#   공백을 허용하면 그 한 건이 걸렸고, 막으면 167건이 전부 환청이었다.
+_REPEAT_CHUNK = re.compile(r"(\S{2,6}?)\1{3,}")  # 공백 없는 2~6글자 4회 이상
 
 
 def is_noise(text: str) -> bool:
@@ -54,6 +66,8 @@ def is_noise(text: str) -> bool:
     if _REPEAT_CHAR.search(t):
         return True
     if _REPEAT_WORD.search(text.strip()):
+        return True
+    if _REPEAT_CHUNK.search(text):
         return True
     # 한 글자짜리는 호출어("동")로도 잡히는데, 그건 명령이 될 수 없다.
     return len(t) <= 1
@@ -67,10 +81,49 @@ _MEDIA_NOISE = ("다음영상에서", "다음영상으로", "구독과좋아요"
                 "좋아요와알림", "알림설정", "시청해주셔서", "시청해줘서",
                 "채널에서만나", "영상에서만나")
 
+# 가전 음성 안내 — 사람이 아니라 기계가 하는 말이다.
+#
+# 실사례 2026-08-16. 에어컨 안내가 통째로 명령이 됐다.
+#   09:12  "여기 내 컴퓨터. 수긍 더... 생활 온도를 25도로 설정합니다."
+#          (3조각 19초로 이어 붙어 클로드까지 갔고, 답은 "무슨 말씀이신지…")
+#   10:25  "…희망 온도를 27도로 설치합니다. 비와? 이제 안 와?"
+#
+# ⚠ 사람이 온도 얘기를 하실 수도 있다("에어컨 25도로 맞춰줘"). 그건 시키는
+#   말이라 어미가 다르다. 기계 안내는 제가 한 일을 알리는 평서형으로 끝난다
+#   — '설정합니다'·'설치합니다'. 그 꼴일 때만 잡는다.
+_APPLIANCE_NOISE = re.compile(
+    r"(희망온도|생활온도|설정온도|온도를\d{1,2}도로)"
+    r"|(\d{1,2}도로(설정|설치|조절)(합니다|하겠습니다|되었습니다))"
+    r"|(전원을(켭니다|끕니다))|(운전을(시작|종료)합니다)")
+
+
+# 홀로 섰을 때만 방송 소리인 인사말 — "감사합니다." 한 마디.
+#
+# 위 _MEDIA_NOISE 는 "시청해주셔서 감사합니다" 를 통째로 잡는데, whisper 가
+# 실제로 올리는 건 앞머리가 잘린 꼬리뿐이다. 들림 로그 7,135건 실측
+# (2026-08-16): 이 꼴이 411건(5.8%)이고 그중 지금 걸리는 건 4건이다.
+# "감사합니다." 340건은 들림 전체에서 가장 많이 나온 문자열이다.
+#
+# 실사례 2026-08-14 09:22 — "…데스크탑에서 텍스트로 수정하고 있어" 뒤에
+# 환청 "감사합니다." 가 조각으로 붙어 명령에 딸려 들어갔고, 조각이 붙을
+# 때마다 말끝 기다림이 되살아나 그 덩어리가 09:24 까지 불어났다.
+#
+# ⚠ 발화 전체가 이 인사말일 때만 본다. 낱말로 찾으면 "…내일 뵙겠습니다.
+#   감사합니다" 처럼 받아쓰게 하신 인사말까지 파먹는다. 빠뜨림이 반복보다
+#   비싸다는 원칙은 여기서도 같다 — 홀로 선 "감사합니다" 는 동백에게 하는
+#   말이 될 수 없지만, 문장에 붙은 것은 사장님이 남기시는 말이다.
+_THANKS_ALONE = re.compile(
+    r"^[네예아어]{0,6}(?:정말|진짜|많이)?"
+    r"(?:감사합니다|감사해요|고맙습니다|고마워요)$")
+
 
 def is_media_noise(text: str) -> bool:
     """영상·방송 상투구인가 — 이어 듣기 조각에서 걸러낸다."""
     s = normalize(text).replace(" ", "")
+    if _THANKS_ALONE.match(s):
+        return True
+    if _APPLIANCE_NOISE.search(s):
+        return True
     return any(k in s for k in _MEDIA_NOISE)
 
 
@@ -288,7 +341,7 @@ _CAL_CREATE = re.compile(
 # ⚠ '변경'·'바꿔' 는 동사꼴로만 적는다. 통짜로 두면 제목에 든 두 글자에
 #   걸려 등록 의도가 부정된다 — "대표 변경의 건", "주소 변경의 건" 처럼
 #   서류 이름에 흔히 들어간다. 2026-08-12 10:34, 사장님이 텔레그램으로
-#   "법무사 대표 변경의 건으로 서류 전달 11시 등록해줘" 하셨는데 등록이
+#   "대표자 변경의 건으로 서류 전달 11시 등록해줘" 하셨는데 등록이
 #   아니라 '일정 찾기' 로 새어 "맞는 일정을 찾지 못했습니다" 로 끝났다.
 _CAL_DESTRUCTIVE = ("취소", "삭제", "지워", "없애", "빼줘",
                     "옮겨", "미뤄", "변경해", "바꿔줘")
@@ -537,6 +590,8 @@ _PERF_BLOCK = ("장소", "까지", "가는", "가면", "이동", "거리", "차�
                "버스", "걸어", "도착", "출발", "미팅", "회의", "약속", "공항")
 # 성능 질문은 짧다. 이보다 길면 '속도' 가 다른 얘기 끝에 끼어든 것이다.
 _PERF_MAX_LEN = 24
+# 볼륨 명령도 짧다 ("소리 좀 키워줘"). 길면 다른 얘기에 '소리' 가 낀 것이다.
+_VOLUME_MAX_LEN = 20
 # 문장이 끝나고 또 이어지면 여러 얘기를 한 것이다 — 성능이 주제가 아니다.
 _MULTI_CLAUSE = re.compile(r"[.!?][^.!?]*[가-힣]")
 
@@ -677,6 +732,153 @@ _DENY = ("아니", "아닌", "아냐", "아녜", "안한", "안했", "말고")
 _NOT_FOR_YOU_MAX_CHARS = 30
 
 
+# ── 나에게 한 말인가 (끼어들지 않기) ──────────────────────
+#
+# 여태 있던 장치는 전부 '사후' 다. 사장님이 "너한테 한 말 아니야" 하시거나
+# (is_not_for_you), 클로드가 "제게 하신 말씀이 아닌 것 같아요" 하고 물러나거나
+# (is_disown_reply). 둘 다 **이미 끼어든 뒤**다.
+#
+# 여기서는 답하기 전에 스스로 묻는다 — 이 말, 나한테 한 건가.
+#
+# ⚠ 문턱을 세게 잡으면 안 된다. 실측(2026-08-12~16 실기록 425건)에서 답한
+#   것의 91%가 호출어 없이 들어왔고, 그 대부분이 정당한 말이었다
+#   ("너 뭐하냐?", "내 말 듣고 있니?", "지금 몇 시니?"). 대화창 안에서는
+#   호출어 없이 이어 말하는 게 정상이기 때문이다. 그래서 기본은 '받는다'
+#   이고, **남에게 한 말이라는 표시가 보일 때만** 물러난다.
+
+# 남에게 하는 말의 표시.
+#   전언·서사  — 남 얘기를 옮기는 꼴. 동백에게 시키는 말에는 안 나온다
+#   타인 호칭  — 부르는 상대가 동백이 아니다
+#   맞장구     — 옆 사람과 주고받는 소리
+_TO_OTHERS = (
+    # 전언·3인칭 서사
+    "본인이", "그러시더", "라고하시", "다고하시", "하시더라", "그랬대",
+    "이래요", "하더라고", "하시던데", "그러더라", "라던데", "대요",
+    # 타인 호칭 (동백은 사장님을 '사장님' 이라 부르지, 사장님이 그리 부르지 않는다)
+    "여보", "형님", "회장님", "사장님", "자기야", "엄마", "아빠", "이사님",
+    # 맞장구·대화 리듬
+    "그렇죠", "그러니까요", "맞아요맞아요", "그러게요", "그쵸",
+)
+# 나를 가리키는 말. 이게 있으면 남에게 한 말일 리 없다.
+_TO_ME = ("너", "니가", "네가", "당신", "자네", "동백")
+# 시키는 말인데 ECHO_TAIL 이 못 잡는 꼴 — 전달형 지시.
+#   실측 2026-08-12 04:31 "남산 미팅 확인하라고, 일정 등록하라고" 가
+#   ECHO_TAIL 에 안 걸려 '지시가 아닌 것' 으로 세어졌다.
+_ORDER_TAIL = ("하라고", "해달라고", "해달래", "해줘야", "해놔", "해둬",
+               "등록하라", "확인하라", "알려달라")
+# 시키는 말꼴 — dongbaek.py 가 쓰는 것과 같은 규칙을 여기서도 쓴다.
+# (dongbaek 을 import 하면 순환이라 config 의 원문에서 다시 만든다.)
+_ECHO_TAIL = re.compile(config.ECHO_TAIL)
+# 이보다 길면 지시 표시 없이는 받지 않는다. 지시는 짧다 — 긴 말은 받아쓰기다.
+_FOR_ME_MAX_CHARS = 120
+# 긴 말에서 '끝맺음' 으로 볼 꼬리 길이. 지시는 문장 끝에 온다.
+_ORDER_TAIL_LOOK = 25
+
+
+def is_for_me(text: str) -> bool:
+    """지금 이 말, 나에게 한 말인가. 답하기 전에 스스로 묻는 자리.
+
+    True 면 받고, False 면 가만히 있는다. 화자 인증·호출어·대화창은 부르는
+    쪽이 이미 본다 — 여기서는 **말 자체만** 본다.
+    """
+    if is_noise(text) or is_media_noise(text):
+        return False
+    t = normalize(text)
+    if not t:
+        return False
+
+    # ⚠ 낱말이 '문장 어디엔가' 있는지로 판단하는 건 짧은 말에서만 옳다.
+    #   길수록 우연히 들어갈 확률이 올라간다 — 저장소가 이미 같은 함정을
+    #   한 번 겪었다(_YOU × _SPEECH × _DENY 주석 참조). 그래서 길이로
+    #   먼저 갈라놓고, 긴 말에는 '끝맺음' 만 본다.
+    long = len(t) > _FOR_ME_MAX_CHARS
+
+    if not long:
+        # 짧은 말 — 대화창 안에서 이어 말하시는 게 정상이라 넉넉히 받는다.
+        if any(normalize(w) in t for w in config.WAKE_WORDS):
+            return True
+        if _ECHO_TAIL.search(text) or any(k in t for k in _ORDER_TAIL):
+            return True
+        if any(k in t for k in _TO_ME):
+            return True
+        if any(k in t for k in _TO_OTHERS):
+            return False
+        return True
+
+    # 긴 말 — 받아쓰기이거나 통화·TV 다. 지시로 **끝날 때만** 받는다.
+    #   "…그거 언제 다 읽어?" 처럼 끝이 지시가 아니면 시킨 말이 아니다.
+    #   문장 한가운데의 '해줘' 는 남에게 한 부탁일 뿐이다.
+    tail = text.strip()[-_ORDER_TAIL_LOOK:]
+    return bool(_ECHO_TAIL.search(tail)) or any(k in normalize(tail)
+                                                for k in _ORDER_TAIL)
+
+
+# ── 메일 알림 켜고 끄기 ────────────────────────────────
+# 사장님 지시 2026-08-16: "메일 들어오면 알려줘". 그때 동백은 "도구가 없어서"
+# 라고 답했는데, 기능은 있었고 꺼져 있었을 뿐이다. 말로 켜고 끌 수 있어야
+# 그런 답이 다시 안 나온다.
+#
+# ⚠ 조회와 갈라야 한다. "메일 왔어?"·"메일 몇 통이야" 는 지금 확인해 달라는
+#   말이지 알림 설정이 아니다. 그래서 '오면·올 때마다' 처럼 앞일을 가리키는
+#   말이나 '알림' 이라는 낱말이 있을 때만 설정으로 본다.
+_MAIL_ALERT_ON = re.compile(
+    r"메일.{0,6}(오면|올때|들어오면|도착하면|받으면).{0,8}(알려|말해|알림)"
+    r"|메일알림.{0,4}(켜|온|해줘|설정)"
+    r"|(새|새로운)메일.{0,6}(알려|알림)")
+_MAIL_ALERT_OFF = re.compile(
+    r"메일.{0,4}알림.{0,6}(꺼|끄|그만|중지|해제|안해도|필요없)"
+    r"|메일.{0,6}(알리지마|알리지말|말하지마)")
+# 무엇까지 알릴지 — 말끝에 붙여 바꾸신다 ("메일 알림 전부로 해줘").
+_MAIL_ALERT_ALL = ("전부", "다알려", "모두", "전체")
+_MAIL_ALERT_VIP = ("중요한것만", "중요한사람", "vip", "브이아이피")
+
+
+def mail_alert_intent(t: str) -> str | None:
+    """'끔'·'vip'·'사람'·'전부' 중 하나, 또는 알림 얘기가 아니면 None."""
+    s = normalize(t)
+    if _MAIL_ALERT_OFF.search(s):
+        return "끔"
+    if not _MAIL_ALERT_ON.search(s) and "메일알림" not in s:
+        return None
+    if any(k in s for k in _MAIL_ALERT_ALL):
+        return "전부"
+    if any(k in s for k in _MAIL_ALERT_VIP):
+        return "vip"
+    return "사람"
+
+
+# 누구를 기다리시는가 — "강남 한빛건설에서 메일 오면 알려줘" 의 '강남 한빛건설'.
+#
+# ⚠ 원문(공백 있는 그대로)에서 뽑는다. normalize 는 띄어쓰기를 지워서
+#   "강남한빛건설" 이 되는데, 그걸 그대로 저장하면 사람이 목록을 읽을 때
+#   낯설다. 견줄 때만 공백을 지운다(mail_alert.should_alert).
+_WATCH_FROM = re.compile(
+    r"([가-힣A-Za-z0-9][가-힣A-Za-z0-9 ]{1,20}?)\s*"
+    r"(?:에서|한테서|으로부터|로부터|께서)?\s*(?:온|오는)?\s*메일")
+# 뽑아도 뜻이 없는 말 — 이런 게 걸리면 '특정 발신인' 이 아니다.
+_WATCH_STOP = ("오늘", "어제", "내일", "새", "새로운", "안읽은", "안 읽은",
+               "그", "저", "이", "무슨", "어떤", "지금", "방금", "최근")
+
+
+def mail_watch_target(t: str) -> str | None:
+    """기다리라고 이르신 발신인. 없으면 None."""
+    if mail_alert_intent(t) is None:
+        return None
+    m = _WATCH_FROM.search(t or "")
+    if not m:
+        return None
+    who = " ".join(m.group(1).split()).strip()
+    # 호출어가 앞에 붙어 오면 뗀다 ("동백아 강남 한빛건설 메일 오면…")
+    for w in config.WAKE_WORDS:
+        if who.startswith(w):
+            who = who[len(w):].strip(" ,.")
+    if len(who) < 2 or who in _WATCH_STOP:
+        return None
+    if any(who.startswith(k + " ") or who == k for k in _WATCH_STOP):
+        return None
+    return who
+
+
 def is_not_for_you(t: str) -> bool:
     """'너한테 한 말 아니야' — 사람끼리 하던 말을 동백이 가로챘다는 신호."""
     if any(k in t for k in _NOT_FOR_YOU_WORDS):
@@ -686,6 +888,73 @@ def is_not_for_you(t: str) -> bool:
     return (any(k in t for k in _YOU)
             and any(k in t for k in _SPEECH)
             and any(k in t for k in _DENY))
+
+
+# 동백이 스스로 "그건 저한테 하신 말씀이 아닌 것 같아요" 라고 답한 꼴.
+# 문구는 클로드가 매번 새로 쓰므로 낱말 조합으로 본다 — 받는 이(저한테·제게),
+# 하신, 그리고 부정. 셋이 다 있어야 한다.
+_DISOWN_ME = ("저한테", "제게", "저에게")
+_DISOWN_SAID = ("하신", "하시는")
+_DISOWN_DENY = ("아닌", "아니", "같지않", "아냐")
+# ⚠ '하신' 만 보면 절반을 놓친다 — 클로드는 '부르다' 로도 똑같이 물러난다.
+#   ("저 부르신 거 아닌 것 같은데요, 필요하신 거 있으시면 다시 불러주세요")
+#   2026-08-15 00:12 실측 — 이 꼴이 안 잡혀 창이 열린 채 남았고, 옆 TV
+#   소리가 앞 명령에 달라붙어 클로드로 한 번 더 올라간 뒤(+$0.19), 이어
+#   '배포.' 가 위험 확인창까지 열었다. 물러났으면 거기서 끊겼어야 할 줄이다.
+#   여기서는 받는 이와 부름이 한 낱말로 붙는다 — normalize 가 공백을 지운다.
+#   그래서 '동백아 라고 부르신' 같은 남의 부름은 안 걸린다.
+_DISOWN_CALLED = ("저부르신", "저부르시는", "저부른", "절부르신", "절부르시는",
+                  "절부른", "저를부르신", "저를부르시는", "저를부른")
+# ⚠ 길이가 결정적이다. 이 답은 언제나 짧다(실측 18~53자). 긴 답에 같은
+#   말이 섞이는 건 '진짜 답변 중에 지나가며 언급한 것' 이라 창을 닫으면
+#   안 된다 — 실측 128자 답은 일정을 여쭙고 나서 나머지만 넘긴 것이었다.
+_DISOWN_MAX_CHARS = 60
+
+# ⚠ 같은 물러남이 영어로도 나온다 — 2026-08-15 09:29 "This clearly isn't
+#   directed at me — someone else's conversation." 가 그 꼴이었다.
+#   speak.korean_only 가 소리는 막았지만 창은 그대로 열려 있어서, 이어진
+#   옆 대화가 또 호출어 없이 올라갔다. 뜻이 물러남이면 창도 닫아야 한다.
+# ⚠ 여기서는 normalize 를 쓰지 않는다. 공백까지 지우면 낱말이 붙어버려
+#   "customer" 안에서 "to me" 가, "performed" 안에서 "for me" 가 잡힌다.
+#   그래서 아포스트로피만 지우고 띄어쓰기는 남긴 뒤, 앞뒤 공백째로 본다.
+_DISOWN_EN_ME = (" at me ", " to me ", " for me ", " my way ")
+_DISOWN_EN_SAID = (" directed ", " meant ", " addressed ", " intended ",
+                   " talking ", " speaking ", " asking ", " conversation ")
+_DISOWN_EN_DENY = (" isnt ", " wasnt ", " arent ", " dont ", " didnt ", " not ")
+# 받는 이가 안 나와도 뜻이 하나뿐인 말 — "Sounds like someone else's conversation."
+_DISOWN_EN_WORDS = (" someone elses conversation ", " somebody elses conversation ")
+_EN_NOT_LETTER = re.compile(r"[^a-z]+")
+
+
+def _en_words(text: str) -> str:
+    """영문만 남기고 낱말을 공백으로 가른다. 앞뒤에도 공백 — 낱말 경계용."""
+    return " " + _EN_NOT_LETTER.sub(" ", text.lower().replace("'", "")
+                                    .replace("’", "")).strip() + " "
+
+
+def is_disown_reply(reply: str) -> bool:
+    """동백의 답이 '제게 하신 말씀이 아니군요' 인가.
+
+    이걸 알아야 하는 이유: 말로는 "다시 불러주세요" 해놓고 대화창을 열어둔
+    채로 있으면, 곧바로 이어진 옆 대화가 호출어 없이 또 클로드로 올라간다.
+    2026-08-14 실측 — 이 답만 28건, $30.11 (그날 전체의 4분의 1).
+    """
+    t = normalize(reply)
+    if len(t) > _DISOWN_MAX_CHARS:
+        return False
+    if (any(k in t for k in _DISOWN_ME)
+            and any(k in t for k in _DISOWN_SAID)
+            and any(k in t for k in _DISOWN_DENY)):
+        return True
+    if (any(k in t for k in _DISOWN_CALLED)
+            and any(k in t for k in _DISOWN_DENY)):
+        return True
+    e = _en_words(reply)
+    if any(k in e for k in _DISOWN_EN_WORDS):
+        return True
+    return (any(k in e for k in _DISOWN_EN_ME)
+            and any(k in e for k in _DISOWN_EN_SAID)
+            and any(k in e for k in _DISOWN_EN_DENY))
 
 
 def wants_memory(t: str) -> bool:
@@ -778,8 +1047,20 @@ def is_gpt_end(t: str) -> bool:
 #   튀어나온다 — 절 단위로 쪼개 짧은 절에서만 찾는다. 그래야
 #   "그만 읽어 달라는 게 아니고 …" 같은 긴 설명이 정지로 읽히지 않는다.
 _STOP_WORDS = re.compile(
-    r"(그만해|그만하라|그만(?![큼두둬])|됐어|됐다|멈춰|스톱|"
+    r"(그만해|그만하라|그만(?![큼두둬])|멈춰|스톱|"
     r"읽지마|그만읽|안읽어도|조용히해|입다물)")
+# ⚠ '됐어' 는 절 안 어디에 있든 잡으면 안 된다. 무엇이 '되었다' 는 말의
+#   끝이기도 하기 때문이다 — "수정됐어?", "반영됐어?", "저장됐어?" 는 상태를
+#   묻는 말이지 중단 명령이 아니다.
+#
+#   실사례 2026-08-16 09:27. 사장님이 "어떤 게 수정됐어?" 하고 물으셨는데
+#   (공백을 지우면 7자라 상한 안에 든다) 정지 요청으로 읽혀 대화창이 닫혔고,
+#   이어서 하신 "둘다 반영이 뭐 뭔데." 가 호출어 없는 말이 되어 통째로
+#   무시됐다. "대화가 두 마디를 못 넘어간다" 가 이 줄이었다.
+#
+#   멈추라는 뜻의 '됐어' 는 홀로 서거나 짧은 앞말만 데리고 온다 — "됐어",
+#   "이제 됐어", "다 됐어". 앞에 동사가 붙으면 그건 완료형이다.
+_STOP_DONE = re.compile(r"^(이제|인제|다|참|아|어|응)?(됐어|됐다|됐어요|됐습니다)")
 _STOP_CLAUSE_MAX = 8
 
 
@@ -806,7 +1087,9 @@ def is_stop_speaking(t: str) -> bool:
     """
     for clause in re.split(r"[.!?,·]+", t or ""):
         c = clause.replace(" ", "").strip()
-        if c and len(c) <= _STOP_CLAUSE_MAX and _STOP_WORDS.search(c):
+        if not c or len(c) > _STOP_CLAUSE_MAX:
+            continue
+        if _STOP_WORDS.search(c) or _STOP_DONE.match(c):
             return True
     return False
 
@@ -850,8 +1133,10 @@ def handle_local(text: str, *, elevated: bool = False) -> str | None:
     # 나간다. 실제로 겪은 오답이다. 문장에 다른 말이 붙어 있으면
     # 단순 조회가 아니라 추론 질문이므로 Claude 에 넘긴다.
     if _is_time_query(t):
+        import speak
+
         now = datetime.now()
-        return f"지금 {now.hour}시 {now.minute}분입니다."
+        return f"지금 {speak.clock_words(now.hour, now.minute)}입니다."
 
     # "뭐라고?" — 방금 한 말을 그대로 다시 읽는다. Claude 에 물을 일이 아니다
     # (실측 6초·$0.08). 이미 말한 문장이 speak 에 남아 있다.
@@ -873,8 +1158,13 @@ def handle_local(text: str, *, elevated: bool = False) -> str | None:
 
         answer = (weather_local.tomorrow() if "내일" in t
                   else weather_local.today())
-        if answer is not None:
-            return answer
+        # ⚠ 조회가 실패해도 클로드로 넘기지 않는다. 넘기면 거짓말이 나간다 —
+        #   클로드에는 날씨 도구가 없어서 "도구가 저한테는 없어서" 라고 답하는데,
+        #   동백은 방금 그 도구를 쓰다 실패한 것이다. 08-16 09:11 실측:
+        #   open-meteo 가 1.1초 만에 끊겨(타임아웃 4초 전) 폴백했고, 36초 뒤
+        #   같은 질문은 로컬이 멀쩡히 답했다. 그 사이에 나간 답이 $0.16·3.2초
+        #   짜리 거짓말이었다. 못 가져온 건 못 가져왔다고 여기서 말한다.
+        return answer or "지금 날씨를 못 가져왔어요. 조금 뒤에 다시 말씀해 주세요."
 
     # 브리핑 — 날씨·일정·메일·광고를 한 호흡에 (전부 로컬, 0 토큰)
     if _is_briefing(t):
@@ -931,14 +1221,29 @@ def handle_local(text: str, *, elevated: bool = False) -> str | None:
             )
             return f"{n}{unit} 타이머 맞췄습니다."
 
-    if "볼륨" in t or "소리" in t:
+    # ⚠ 볼륨은 짧고 분명할 때만 건드린다.
+    #
+    #   2026-08-14 18:04 사고: 사장님이 옆에서 사적인 대화(주식·대출)를
+    #   하시는 중에 "혹시 빨간색 이미 꺼져 있어? 뭔 소리야…" 가 명령으로
+    #   잡혔고, '소리' + '꺼' 두 낱말이 맞아떨어져 **음소거**가 걸렸다.
+    #   MERGE_ON_INTERRUPT 가 대화를 앞 명령에 계속 붙여 같은 판정이
+    #   네 번 반복됐고, 그대로 13시간 소리가 꺼져 있었다 — 사장님은
+    #   당신이 끈 줄도 모르셨고, 동백은 불러도 대답이 안 들렸다.
+    #
+    #   되돌리기 어려운 쪽(음소거)일수록 좁게 잡아야 한다. 소리를 끄면
+    #   동백이 스스로 "껐습니다" 라고 알릴 방법조차 사라진다.
+    if (len(t.replace(" ", "")) <= _VOLUME_MAX_LEN
+            and not _MULTI_CLAUSE.search(t.strip())
+            and ("볼륨" in t or "소리" in t or "음소거" in t or "무음" in t)):
         if any(k in t for k in ("올려", "키워", "크게")):
             _osa("set volume output volume (output volume of (get volume settings) + 15)")
             return "볼륨 올렸습니다."
         if any(k in t for k in ("내려", "줄여", "작게")):
             _osa("set volume output volume (output volume of (get volume settings) - 15)")
             return "볼륨 내렸습니다."
-        if any(k in t for k in ("음소거", "꺼", "무음")):
+        # ⚠ '꺼' 를 뺀다. "꺼져 있어"·"불 꺼"·"꺼내" 가 전부 걸린다.
+        #   음소거는 명시적으로 청할 때만 — 그 말을 안 쓰시면 안 끈다.
+        if any(k in t for k in ("음소거", "무음", "소리꺼", "소리 꺼")):
             _osa("set volume with output muted")
             return "음소거했습니다."
 
@@ -1437,8 +1742,12 @@ def _briefing_text() -> str:
                     if e.get("all_day"):
                         when = "종일"
                     else:
+                        import speak
+
                         s = e["start"]
-                        when = f"{s.hour}시" + (f" {s.minute}분" if s.minute else "")
+                        # ⚠ 귀로 듣는 자리다. clock_words 만 쓰면 14시가
+                        #   '십사시' 가 된다 — 아무도 그렇게 말하지 않는다.
+                        when = speak.clock_ampm(s.hour, s.minute)
                     heads.append(f"{when} {e['title']}")
                 parts.append(f"오늘 일정 {len(evs)}건. " + ". ".join(heads) + ".")
     except Exception:
@@ -1578,6 +1887,24 @@ def is_calendar_delete_all(text: str) -> bool:
     return bool(_CAL_DELETE_ALL.search(normalize(text)))
 
 
+# 일정 쓰기를 받아줄 말의 최대 길이. 실측한 등록 지시는 가장 긴 것이
+# 40자 안쪽이었다 ("오늘 일정에 대표자 변경의 건으로 서류 전달
+# 11시 등록해줘" 가 35자). 200자는 넉넉히 두 배 넘게 잡은 값이고,
+# 사고를 낸 받아쓰기는 3,499자였다 — 그 사이에 걸릴 지시는 없다.
+_WRITE_MAX_CHARS = 200
+
+# 일정 제목의 최대 길이. 캘린더에서 읽히지도 않는 긴 제목이 들어왔다면
+# 제목을 뽑은 게 아니라 문단을 통째로 실어 나른 것이다.
+_TITLE_MAX_CHARS = 40
+
+
+def _safe_title(title: str | None) -> str | None:
+    """등록해도 되는 제목인가. 아니면 None — 호출측이 Claude 로 넘긴다."""
+    if not title or len(title) < 2 or len(title) > _TITLE_MAX_CHARS:
+        return None
+    return title
+
+
 def _handle_schedule_write(text: str, t: str,
                            allow_delete: bool = False) -> str | None:
     """일정 등록·삭제를 로컬에서. 해석이 확실할 때만.
@@ -1585,6 +1912,23 @@ def _handle_schedule_write(text: str, t: str,
     allow_delete 는 '음성 승인을 이미 받았는가' 다. 등록은 되돌리기 쉬워
     승인 없이 하고, 삭제는 되돌릴 수 없어 승인을 받은 뒤에만 한다.
     """
+    # ⚠ 받아쓰기가 명령으로 새는 걸 막는 문턱.
+    #
+    #   2026-08-14 14:58~15:04 사고. 사장님이 전날 미팅 내용을 구술하시는
+    #   동안, 말을 보태실 때마다 앞말과 합쳐진 전사본 전체가 다시 명령으로
+    #   처리됐다 (3,499자까지 불어나 열 번). 그때마다 캘린더에 일정이
+    #   생겨 열 건이 남았다.
+    #
+    #   게이트를 통과시킨 건 "목표 매출 한번 만들어보자" 의 '만들' 이었고,
+    #   시각은 본문의 "4시 반", 길이는 "4시간 동안 얘기 들었다" 에서 왔다.
+    #   제목에는 전사본이 통째로 들어갔다. 심지어 "그만해, 그냥 저장만
+    #   하고 요약 정리해 두라고" 하신 제지까지 버퍼 끝에 붙어 또 등록됐다.
+    #
+    #   정규식을 좁히는 걸로는 못 막는다. 3,000자 안에서는 어떤 낱말이든
+    #   우연히 걸린다. 막을 수 있는 건 길이뿐이다 — 지시는 짧고, 긴 말은
+    #   명령이 아니라 받아쓰기다. 길면 손대지 않고 Claude 로 넘긴다.
+    if len(text) > _WRITE_MAX_CHARS:
+        return None
     # 날짜 통째 삭제 — 승인(allow_delete) 후에만. 키워드 검색보다 먼저
     # 봐야 한다: "오늘 내 건 일정을 전부 다 삭제해" 가 키워드 검색으로
     # 흘러 "…와 맞는 일정을 찾지 못했습니다" 가 됐다 (실사례 09:02).
@@ -1657,8 +2001,8 @@ def _handle_schedule_write(text: str, t: str,
     #   뜻으로 "등록해줘" 라고 하시지 않는다. 반대로 옮기기 동사는 제목 속에
     #   섞여 들어온다.
     #
-    #   실측 2026-08-12 10:34 — "오늘 일정에 법무사 대표 변경의 건으로
-    #   서류 전달 11시 등록해줘" 가 옮기기로 새어 "'법무사 대표 의 건 어
+    #   실측 2026-08-12 10:34 — "오늘 일정에 대표자 변경의 건으로
+    #   서류 전달 11시 등록해줘" 가 옮기기로 새어 "'대표자 변경의 건 어
     #   서류 전달' 와 맞는 일정을 찾지 못했습니다" 로 끝났다.
     #   '대표 변경의 건' 은 법무 서류 이름이지 옮기라는 말이 아니다.
     #
@@ -1699,8 +2043,8 @@ def _handle_schedule_write(text: str, t: str,
         dt = kt.parse_datetime(text)
         if dt is None:
             return None          # 날짜·시각이 불명확 → Claude 로
-        title = kt.extract_title(text)
-        if not title or len(title) < 2:
+        title = _safe_title(kt.extract_title(text))
+        if title is None:
             return None
         return calendar_local.create(title, dt, kt.parse_duration_hours(text))
 
@@ -1711,7 +2055,7 @@ def _schedule_via_qwen(text: str, t: str) -> str | None:
     """규칙이 못 읽은 일정 명령을 큐웬이 읽는다 (0원, 약 0.6초).
 
     규칙(정규식+낱말표)은 새 표현마다 깨진다. 2026-08-12 하루에만 '변경'
-    두 글자 때문에 세 곳을 고쳤다 — "법무사 대표 변경의 건" 은 서류
+    두 글자 때문에 세 곳을 고쳤다 — "대표자 변경의 건" 은 서류
     이름인데 옮기기 명령으로 읽혔다. 사장님 제안으로 큐웬을 사이에 끼운다.
 
         규칙 0.03초  →  큐웬 0.6초·0원  →  클로드 10초·$0.28
@@ -1735,7 +2079,8 @@ def _schedule_via_qwen(text: str, t: str) -> str | None:
     if not parsed:
         return None
     title, intent = parsed["title"], parsed["intent"]
-    if len(title) < 2:
+    # 큐웬이 제목을 뽑되, 문단을 통째로 옮겨 적는 일이 있다. 길이로 막는다.
+    if _safe_title(title) is None:
         return None
 
     import calendar_local

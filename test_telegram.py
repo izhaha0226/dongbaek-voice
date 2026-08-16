@@ -5,6 +5,10 @@
 밖에 있다고 게이트가 느슨해지면 안 된다.
     python test_telegram.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import time
 
 import telegram_bridge as tb

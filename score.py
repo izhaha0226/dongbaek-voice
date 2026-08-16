@@ -31,6 +31,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 
 import config
+import dbstore
 
 LOG = config.STATE / "daemon.log"
 OUT = config.STATE / "interaction_scores.jsonl"
@@ -228,16 +229,7 @@ def _lie_rows(days: int) -> list[dict]:
     """
     since = (datetime.now() - timedelta(days=days)).isoformat()
     out: list[dict] = []
-    try:
-        lines = config.TRANSCRIPT_LOG.read_text(
-            encoding="utf-8", errors="replace").splitlines()[-3000:]
-    except OSError:
-        return out
-    for line in lines:
-        try:
-            r = json.loads(line)
-        except ValueError:
-            continue
+    for r in dbstore.rows(since=since, limit=3000):
         if r.get("ts", "") < since:
             continue
         reply = (r.get("reply") or "").strip()

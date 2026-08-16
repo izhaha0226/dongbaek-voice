@@ -214,7 +214,7 @@ end tell''')
 # 비워두면 Mail 이 임의의 계정을 고르는데, 발신 서버가 지정되지 않은
 # 계정이 걸리면 "발신 메일 서버를 선택하십시오" 대화창이 뜨고 발송이 멈춘다.
 # 이 주소는 발신 서버(smtp.worksmobile.com)가 물려 있는 것으로 확인된 계정이다.
-DEFAULT_SENDER = "you@example.com"
+DEFAULT_SENDER = "yourname@dongbaek.ai"
 
 
 # 발송 성공을 프로그램으로 판정하는 방법이 없다. 세 가지를 시도해 전부 실패했다:

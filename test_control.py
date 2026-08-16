@@ -4,6 +4,10 @@
 이 경로로 안전 게이트가 뚫리면 아이폰을 주운 사람이 프로덕션을 배포할 수 있다.
     python test_control.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import json
 import urllib.error
 import urllib.request

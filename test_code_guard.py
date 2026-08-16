@@ -4,6 +4,10 @@
 핵심: 수정한 것이 '반드시 되돌아가는가'. 이게 안 되면 음성 코딩은 위험하다.
     python test_code_guard.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import subprocess
 import tempfile
 from pathlib import Path
@@ -59,10 +63,9 @@ for q, want in [
     check(f"{q!r} → 되돌리기={want}", dongbaek._is_undo(q), want)
 
 print("\n[4] 대상 저장소 추측")
-# ⚠ 이 검사는 원래 만든 사람 맥에서만 통과했다 — ~/projects 아래에 그 이름의
-#   폴더가 실제로 있어야 하기 때문이다. 남의 맥에서는 늘 빨갛다.
-#   그래서 폴더를 그 자리에서 만들어 놓고 본다. 시험은 기계를 타면 안 된다.
-import config as _cfg  # noqa: E402
+# ⚠ 이 검사는 만든 사람 맥에서만 통과했다 — ~/projects 아래에 그 이름의
+# 폴더가 실제로 있어야 하기 때문이다. 시험은 기계를 타면 안 된다.
+import config as _cfg
 
 with tempfile.TemporaryDirectory() as _projects:
     (Path(_projects) / "myshop-site").mkdir()

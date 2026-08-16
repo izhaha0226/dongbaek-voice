@@ -5,6 +5,10 @@
 몽키패치해 상주 경로의 수명·폴백 규칙만 본다.
     python test_resident.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import asyncio
 import sys
 

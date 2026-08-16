@@ -12,6 +12,10 @@
   ③ 소리로 읽는 말이 짧은가 (34통을 귀로 듣는 건 쓸모가 없다)
     python test_mail_report.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import sys
 
 import config

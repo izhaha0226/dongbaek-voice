@@ -10,6 +10,10 @@
      소리로만 듣는 사장님은 숫자가 틀린 걸 알아챌 방법이 없다.
     python test_voice_style.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import re
 import sys
 from pathlib import Path

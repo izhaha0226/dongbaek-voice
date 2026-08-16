@@ -28,6 +28,7 @@
 import json
 import re
 import subprocess
+import os
 import sys
 import urllib.parse
 import urllib.request
@@ -35,6 +36,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import config
+import dbstore
 
 WIKI_DIR = Path.home() / "Documents/Obsidian Vault/Work/업무일지"
 WORKDAY_START_HOUR = 5          # '오늘 업무' 는 새벽 5시부터 센다
@@ -85,6 +87,23 @@ def _speak_via_daemon(text: str) -> bool:
 
 
 def _to_telegram(prefix: str, text: str) -> bool:
+    """텔레그램으로 보낸다. 테스트가 돌 때는 보내지 않는다.
+
+    ⚠ 이 저장소는 같은 사고를 이미 여러 번 겪었다 — 테스트가 사장님 폰으로
+      쏘는 것. 그래서 record()·perf.record()·self_improve._report()·
+      _write_note()·_history_add() 에 전부 같은 가드가 박혀 있다.
+      그런데 정작 **텔레그램으로 나가는 유일한 문**인 여기에는 없었다.
+
+      2026-08-15 06:17~06:47 실사례: call_notes.save() 에 공유 링크 전송을
+      붙였는데, test_call_notes 가 그 함수를 부른다. 스위트를 돌릴 때마다
+      "📞 통화 정리" 가 폰으로 갔고, 위키 경로가 임시폴더
+      (/var/folders/.../tmpXXXX/)라 사장님이 이상함을 알아채셨다.
+      하루에 열 번 넘게 돌렸으니 그만큼 나갔다.
+
+      한 곳만 막으면 통화·미팅·메일·자가개선 보고가 전부 함께 막힌다.
+    """
+    if os.path.basename(sys.argv[0] or "").startswith("test_"):
+        return False
     try:
         import telegram_bridge as tb
 
@@ -131,11 +150,7 @@ def _dongbaek_done(since: str) -> list[str]:
     """동백이 처리한 업무 명령 — 클로드 경로만. 잡담·단순 조회는 일지감이 아니다."""
     items: list[str] = []
     try:
-        for line in config.TRANSCRIPT_LOG.read_text().splitlines():
-            try:
-                r = json.loads(line)
-            except ValueError:
-                continue
+        for r in dbstore.rows(since=since):
             if r.get("ts", "") < since or r.get("route") != "claude":
                 continue
             cmd = (r.get("command") or "").strip()
@@ -152,6 +167,8 @@ def _dongbaek_done(since: str) -> list[str]:
 
 
 def _meetings_today() -> list[str]:
+    import speak
+
     try:
         import calendar_local
 
@@ -165,7 +182,7 @@ def _meetings_today() -> list[str]:
     for e in evs:
         if e["start"].date() != today:
             continue
-        when = "종일" if e.get("all_day") else f"{e['start'].hour}시"
+        when = "종일" if e.get("all_day") else speak.clock_ampm(e["start"].hour, e["start"].minute)
         out.append(f"미팅: {when} {e['title']}")
     return out[:6]
 
@@ -270,6 +287,7 @@ def morning() -> tuple[str, str]:
         pass
     try:
         import calendar_local
+        import speak
 
         evs = calendar_local.events(days=1)
         if evs is not None:
@@ -278,7 +296,7 @@ def morning() -> tuple[str, str]:
             else:
                 heads = []
                 for e in evs[:4]:
-                    when = "종일" if e.get("all_day") else f"{e['start'].hour}시"
+                    when = "종일" if e.get("all_day") else speak.clock_ampm(e["start"].hour, e["start"].minute)
                     heads.append(f"{when} {e['title']}")
                 parts.append(f"오늘 일정 {len(evs)}건. " + ". ".join(heads) + ".")
     except Exception:

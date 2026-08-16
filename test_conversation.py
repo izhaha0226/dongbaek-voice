@@ -13,6 +13,10 @@
   ④ 반쪽만 듣고 만든 앞 답변은 말하지 않고 버린다
     python test_conversation.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import threading
 import time
 
@@ -289,6 +293,33 @@ time.sleep(0.4)
 import voice_style
 check("답변이 복명복창을 밀어냈다", speak.recent_text(),
       voice_style.apply(speak.clean("지금 열한 시 이십 분입니다.")))
+
+print("\n[8] 호출어 없이 긴 말은 '시키는 말' 일 때만 받는다")
+# ⚠ 화자 확인만으로는 못 가른다. 사장님이 남과 대화하실 때도 사장님 목소리다 —
+#   화자는 '누가 말했나' 만 알지 '누구에게 한 말인가' 는 모른다.
+#   2026-08-14 18:04 사고가 그 구멍으로 들어왔다: 옆 대화(주식·대출)가
+#   300자짜리 명령이 되어 '소리…꺼' 로 음소거가 걸렸고, 13시간 소리가
+#   꺼져 있었다. 사장님은 당신이 끈 줄도 모르셨다.
+#
+#   그래서 하나 더 본다 — 시키는 말로 끝나는가. 동백에게 하는 말은 결국
+#   뭘 시키므로 요청 어미로 끝나고, 옆 사람과의 대화는 아무렇게나 끝난다.
+#   실측(transcript 전량): 호출어 없이 120자 넘는 84건 중 83건이 걸렸고,
+#   49종을 눈으로 확인했더니 전부 통화·잡담·TV 였다.
+_ambient = [
+    "내가 추가로 대출 받을 수도 있다고 하던데. 하지마. 그냥 다시 시작하면 돼. "
+    "금방 저거 올라가. 다시 시작하면 됩니다? 늘 걱정 안해. 신경 써야지",
+    "한 세입자 명의 쪽방 살인사건에서 세입자는 수감 중이라 애인 정씨가 진범으로 "
+    "밝혀진 경위를 설명하는 방송인데 그게 참 기가 막히더라고",
+]
+_orders = [
+    "광고플랫폼에 들어가면 거기 한빛리조트라고 있잖아 우리 광고주 중에 그 데이터를 좀 확인해줘",
+    "어제 온 메일 중에 배움창작소에서 온 것들만 모아서 업체별로 정리해줘",
+    "내일 오후 세시에 강남에서 미팅 있는 거 캘린더에 등록해 주세요",
+]
+for t in _ambient:
+    check(f"옆 대화는 버린다: {t[:22]!r}", bool(dongbaek._ECHO_TAIL.search(t)), False)
+for t in _orders:
+    check(f"시키는 말은 받는다: {t[:22]!r}", bool(dongbaek._ECHO_TAIL.search(t)), True)
 
 print()
 if FAIL:

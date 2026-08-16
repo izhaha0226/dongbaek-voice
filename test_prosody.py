@@ -4,6 +4,10 @@
 실제 목소리 대신 합성 성대파(피치를 정확히 통제한 톤)로 판정 논리만 본다.
 whisper·마이크 없이 돈다.
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import numpy as np
 
 import prosody

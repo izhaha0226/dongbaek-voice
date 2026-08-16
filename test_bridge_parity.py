@@ -16,6 +16,10 @@
 Claude 를 실제로 부르지 않는다 (subprocess 를 가로채고 옵션 객체만 만든다).
     python test_bridge_parity.py
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
+
 import dataclasses as dc
 import json
 import subprocess
