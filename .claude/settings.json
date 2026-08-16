@@ -1,0 +1,57 @@
+{
+  "_comment": [
+    "동백 전용 권한. 헤드리스(claude --print)는 권한 대화창을 띄울 수 없으므로",
+    "여기에 미리 승인해 둔 도구만 평상시에 쓸 수 있다.",
+    "",
+    "⚠ 이 파일이 먹으려면 워크스페이스가 '신뢰됨' 이어야 한다.",
+    "   ~/.claude.json 의 projects['이 저장소 경로'].hasTrustDialogAccepted = true",
+    "   아니면 규칙 전체가 조용히 무시된다.",
+    "",
+    "원칙: 읽기만 승인한다.",
+    "  - 일정 조회·메일 검색 = 되돌릴 일이 없으므로 사전 승인",
+    "  - 메일 발송·일정 변경·라벨 조작 = deny.",
+    "    음성 재확인(DANGER_PATTERNS)을 통과한 elevated 호출에서만 실행된다."
+  ],
+  "permissions": {
+    "allow": [
+      "mcp__claude_ai_Google_Calendar__list_calendars",
+      "mcp__claude_ai_Google_Calendar__list_events",
+      "mcp__claude_ai_Google_Calendar__search_events",
+      "mcp__claude_ai_Google_Calendar__get_event",
+      "mcp__claude_ai_Google_Calendar__suggest_time",
+
+      "mcp__claude_ai_Gmail__search_threads",
+      "mcp__claude_ai_Gmail__get_thread",
+      "mcp__claude_ai_Gmail__get_message",
+      "mcp__claude_ai_Gmail__list_labels",
+      "mcp__claude_ai_Gmail__list_drafts",
+
+      "mcp__mail__mail_accounts",
+      "mcp__mail__mail_unread_count",
+      "mcp__mail__mail_recent",
+      "mcp__mail__mail_search",
+      "mcp__mail__mail_read",
+
+      "Read",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch"
+    ],
+    "_write_tools_note": [
+      "쓰기 도구는 allow 에도 deny 에도 넣지 않는다. 의도된 설계다.",
+      "  - allow 에 없으므로 → 평상시(normal)에는 거부된다",
+      "  - deny 에 없으므로 → 음성 재확인을 통과한 elevated 호출에서는 실행된다",
+      "deny 는 절대 차단이라 elevated 로도 못 뚫는다. 그래서 비워둔다.",
+      "",
+      "대상: Calendar create/update/delete/respond_to_event,",
+      "      Gmail create_draft/update_draft/label_*/create_label 등,",
+      "      mail_send (메일 발송), mail_trash (휴지통 이동)",
+      "이 도구들이 실행되려면 DANGER_PATTERNS 에 걸려 '진행' 승인을 받아야 한다.",
+      "",
+      "참고: Gmail 커넥터에는 메일 '발송'·'삭제' 도구가 아예 없다.",
+      "      초안 작성과 라벨 조작까지만 가능하다."
+    ],
+    "deny": []
+  }
+}

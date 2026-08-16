@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  텔레그램 브릿지 상시 실행용 launchd 설정.
+
+  데몬(com.dongbaek.dongbaek)과 별개 프로세스다 — 마이크가 없어도,
+  데몬이 죽어도 밖에서 텔레그램으로 동백을 부를 수 있어야 한다.
+
+  설치:
+    cp ~/dongbaek/com.dongbaek.dongbaek-telegram.plist ~/Library/LaunchAgents/
+    launchctl load  ~/Library/LaunchAgents/com.dongbaek.dongbaek-telegram.plist
+  중지:
+    launchctl unload ~/Library/LaunchAgents/com.dongbaek.dongbaek-telegram.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dongbaek.dongbaek-telegram</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__ROOT__/.venv/bin/python</string>
+        <string>__ROOT__/telegram_bridge.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__ROOT__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- 토큰 파일이 없거나 네트워크가 죽었을 때 재시작 폭주 방지 -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>__ROOT__/state/telegram.log</string>
+    <key>StandardErrorPath</key>
+    <string>__ROOT__/state/telegram.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:__HOME__/.local/bin</string>
+        <key>DONGBAEK_DAEMON</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

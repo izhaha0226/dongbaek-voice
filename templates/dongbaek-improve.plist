@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  자가 정비 — 3시간 단위 (사장님 지시 2026-08-13: "새벽 한 번이 아니라
+  3시간 단위로 수정할 수 있도록"). 동백이 오류 로그와 IMPROVE.md 를
+  증거로 자기 코드를 회당 하나씩 고친다 (self_improve.py).
+
+  낮 실행 안전선: 작업 트리가 더러우면 건너뜀(사람 작업 보호) ·
+  diff 상한 · 실패 시 격리 롤백 · 회당 클로드 dev 호출 1회.
+
+  설치:
+    cp ~/dongbaek/com.dongbaek.dongbaek-improve.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.dongbaek.dongbaek-improve.plist
+  지금 한 번 돌리기:
+    launchctl kickstart -k gui/$UID/com.dongbaek.dongbaek-improve
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dongbaek.dongbaek-improve</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__ROOT__/.venv/bin/python</string>
+        <string>__ROOT__/self_improve.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__ROOT__</string>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>1</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>30</integer></dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__ROOT__/state/self_improve.log</string>
+    <key>StandardErrorPath</key>
+    <string>__ROOT__/state/self_improve.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:__HOME__/.local/bin</string>
+        <key>DONGBAEK_DAEMON</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

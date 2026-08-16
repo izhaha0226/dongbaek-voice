@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "mail": {
+      "command": "__ROOT__/.venv-mcp/bin/python",
+      "args": [
+        "__ROOT__/mail_mcp.py"
+      ]
+    },
+    "code-index": {
+      "command": "code-index-mcp",
+      "args": []
+    },
+    "dongbaek": {
+      "command": "__ROOT__/.venv-mcp/bin/python",
+      "args": [
+        "__ROOT__/dongbaek_mcp.py"
+      ]
+    }
+  }
+}

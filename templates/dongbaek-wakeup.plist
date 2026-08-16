@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  기상 알람. 매일 정해진 시각에 깨어나되, 울릴지 말지는 state/wakeup.json 이 정한다.
+
+  launchd 에는 '내일 4시 한 번' 이라는 개념이 없다. 그래서 스케줄은 매일 두고,
+  하루치만 무장하는 판단을 wakeup.py 가 한다 (울리고 나면 스스로 enabled=false).
+
+  설치:
+    cp ~/dongbaek/com.dongbaek.dongbaek-wakeup.plist ~/Library/LaunchAgents/
+    launchctl load  ~/Library/LaunchAgents/com.dongbaek.dongbaek-wakeup.plist
+  지금 한 번 시험:
+    launchctl kickstart -k gui/$UID/com.dongbaek.dongbaek-wakeup
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dongbaek.dongbaek-wakeup</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__ROOT__/.venv/bin/python</string>
+        <string>__ROOT__/wakeup.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__ROOT__</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__ROOT__/state/wakeup.log</string>
+    <key>StandardErrorPath</key>
+    <string>__ROOT__/state/wakeup.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:__HOME__/.local/bin</string>
+        <key>DONGBAEK_DAEMON</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

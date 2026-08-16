@@ -1,0 +1,17 @@
+{
+  "_comment": [
+    "동백 전용 MCP. 서버를 늘릴수록 명령 한 번의 고정 토큰이 커지므로",
+    "음성으로 실제 쓰는 것만 둔다.",
+    "",
+    "mail: macOS Mail.app 을 AppleScript 로 조작한다.",
+    "  claude.ai Gmail 커넥터에는 발송·삭제 도구가 없어서 이걸로 메운다.",
+    "  네이버웍스를 포함한 계정 전부를 다룬다.",
+    "  도구별 권한은 .claude/settings.json 에서 나눈다 (읽기=allow, 쓰기=승인 후)."
+  ],
+  "mcpServers": {
+    "mail": {
+      "command": "__ROOT__/.venv/bin/python",
+      "args": ["__ROOT__/mail_mcp.py"]
+    }
+  }
+}

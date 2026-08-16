@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  동백 상시 실행용 launchd 설정.
+
+  설치:
+    cp ~/dongbaek/com.dongbaek.dongbaek.plist ~/Library/LaunchAgents/
+    launchctl load  ~/Library/LaunchAgents/com.dongbaek.dongbaek.plist
+  중지:
+    launchctl unload ~/Library/LaunchAgents/com.dongbaek.dongbaek.plist
+
+  ⚠ 먼저 터미널에서 ./run.sh 를 한 번 실행해 마이크 권한을 허용할 것.
+    launchd 는 권한 요청 창을 띄우지 못해서, 허용 전에 등록하면 무음만 녹음된다.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dongbaek.dongbaek</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__ROOT__/run.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__ROOT__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- 실패가 반복될 때 초당 수십 번 재시작하는 걸 막는다.
+         마이크가 빠졌거나 인증이 만료됐을 때 조용히 CPU 를 태우는 상황 방지. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- 화면 잠금·로그아웃과 무관하게 계속 돈다 -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>__ROOT__/state/daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>__ROOT__/state/daemon.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:__HOME__/.local/bin</string>
+        <key>DONGBAEK_DAEMON</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

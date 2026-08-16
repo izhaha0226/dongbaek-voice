@@ -1,0 +1,30 @@
+# 개인 설정 — 회사 이름·프로젝트 목록·이메일 주소가 들어간다.
+# config_local.example.py 를 복사해서 만든다. 절대 올리지 않는다.
+/config_local.py
+
+# 런타임 상태 — 비밀과 개인 대화 기록이 들어있다. 절대 올리지 않는다.
+#   token.txt        제어 서버 인증 토큰
+#   telegram.json    텔레그램 봇 토큰
+#   session.json     Claude 세션 ID
+#   transcript.jsonl 실제로 주고받은 명령과 답변
+#   tokens.jsonl     프롬프트 원문 일부 + 비용
+#   voiceprints.npz  등록된 목소리 지문
+state/
+
+# setup.sh 가 이 맥의 절대경로를 채워 만든다. 남의 맥에서는 안 맞는다.
+/.mcp.json
+/mcp-dongbaek.json
+/launchd/
+
+# 파이썬 환경 (1.1GB). setup.sh 로 재생성한다.
+.venv/
+.venv-mcp/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 임시 음성 파일
+*.wav
+*.aiff
+
+.DS_Store

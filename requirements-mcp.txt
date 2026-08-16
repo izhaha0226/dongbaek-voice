@@ -1,0 +1,8 @@
+# 메일 MCP 서버 전용 환경(.venv-mcp) — setup.sh ①-2 가 이 파일로 만든다.
+#
+# 왜 따로인가: mail_mcp.py 는 mcp 2.x 전용 API(mcp.server.mcpserver)를 쓰는데,
+# 본 venv 의 claude-agent-sdk 가 mcp<2.0.0 을 강제한다. 한 venv 에 같이 깔면
+# 의존성 해석이 불가능해 설치가 깨진다. MCP 서버는 어차피 별도 프로세스라
+# 인터프리터만 갈라타면 된다 — mcp-dongbaek.json 의 command 가 .venv-mcp 를
+# 가리킨다.
+mcp>=2.0.0

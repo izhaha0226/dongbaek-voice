@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  받은 메일에서 업무 일정을 찾아 캘린더에 등록. 매일 오전 11시.
+
+  설치:
+    cp ~/dongbaek/com.dongbaek.dongbaek-mail.plist ~/Library/LaunchAgents/
+    launchctl load  ~/Library/LaunchAgents/com.dongbaek.dongbaek-mail.plist
+  중지:
+    launchctl unload ~/Library/LaunchAgents/com.dongbaek.dongbaek-mail.plist
+  지금 한 번 돌리기:
+    launchctl kickstart -k gui/$UID/com.dongbaek.dongbaek-mail
+
+  데몬(com.dongbaek.dongbaek)과 별개 프로세스다. 끝나면 종료되며,
+  결과는 데몬의 제어 서버로 보내 데몬이 대신 말한다 — 소리를 내는 곳은
+  한 곳이어야 출력 장치를 두고 다투지 않는다.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dongbaek.dongbaek-mail</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__ROOT__/.venv/bin/python</string>
+        <string>__ROOT__/mail_digest.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__ROOT__</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>11</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- 한 번 돌고 끝나는 작업이다. 죽었다고 되살리면 안 된다. -->
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__ROOT__/state/mail_digest.log</string>
+    <key>StandardErrorPath</key>
+    <string>__ROOT__/state/mail_digest.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:__HOME__/.local/bin</string>
+        <key>DONGBAEK_DAEMON</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

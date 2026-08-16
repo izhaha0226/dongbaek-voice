@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  뉴스 브리핑 — 평일 8:00. 해커뉴스 오늘자 + AI 마케팅 소식을 정리해
+  말하고(요지), 텔레그램(전문)과 위키(마케팅/AI 마케팅 데일리 브리핑)에 남긴다.
+
+  설치:
+    cp ~/dongbaek/com.dongbaek.dongbaek-news.plist ~/Library/LaunchAgents/
+    launchctl load  ~/Library/LaunchAgents/com.dongbaek.dongbaek-news.plist
+  지금 한 번 돌리기:
+    launchctl kickstart -k gui/$UID/com.dongbaek.dongbaek-news
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dongbaek.dongbaek-news</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__ROOT__/.venv/bin/python</string>
+        <string>__ROOT__/briefing.py</string>
+        <string>--mode</string>
+        <string>news</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__ROOT__</string>
+
+    <!-- 평일(월=1 … 금=5) 8:00 -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__ROOT__/state/briefing.log</string>
+    <key>StandardErrorPath</key>
+    <string>__ROOT__/state/briefing.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:__HOME__/.local/bin</string>
+        <key>DONGBAEK_DAEMON</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>
