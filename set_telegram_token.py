@@ -8,7 +8,7 @@
 """
 import sys as _sys
 from pathlib import Path as _Path
-_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))  # 저장소 루트 임포트
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
 
 import getpass
 import json

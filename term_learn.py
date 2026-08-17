@@ -204,7 +204,7 @@ def main() -> int:
         print("새로 배울 오기가 없습니다.")
         return 0
     for r in rules:
-        print(f"  배움: {r['wrong']} → {r['right']} ({r['count']}회, 유사도 {r['score']})")
+        print(f"  마바: {r['wrong']} → {r['right']} ({r['count']}회, 유사도 {r['score']})")
     for r in weak:
         print(f"  보류: {r['wrong']} → {r['right']} ({r['count']}회, {r['skip']})")
     if "--apply" in sys.argv:

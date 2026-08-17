@@ -181,6 +181,116 @@ _CALL_SHAPE = (
     "들린 것만 쓰고 지어내지 마라.\n\n")
 
 
+# ── 로컬 모델로 정리 (2026-08-16 시험) ─────────────────────
+#
+# 사장님 지시: "통화정리까지 넘겨서 테스트해보자".
+#
+# ⚠ 2026-08-14 에 이 자리를 큐웬(4B)에서 클로드로 옮겼다. 이유가 위에 적혀
+#   있다 — "소형 모델은 애매한 대목에 '모른다' 대신 '지어낸다'. 통화 요약은
+#   나중에 사실로 믿고 움직이는 문서라 그 위험을 질 수 없다."
+#   지금 되돌리는 게 아니라 **더 큰 모델로 다시 대 보는** 것이다.
+#   지난 통화 원문으로 A/B 를 먼저 돌렸다: tools/bench_call_summary.py
+#
+# ⚠ 마크다운을 그대로 시키지 않고 **칸을 나눠 JSON 으로 받는다.**
+#   이 모델은 생각(thinking)을 앞에서 길게 하는데, 형식을 강제하지 않으면
+#   그 영어 사고 과정이 그대로 답이 되어 나온다(실측). 스키마를 주면
+#   마지막에 JSON 만 남는다. 렌더링은 코드가 한다 — 절 이름이 틀릴 일이
+#   없어지고, 뒤에서 일정 후보를 뽑는 파서도 안 깨진다.
+# 요약이 아닌 것들. 두 가지 실패 꼴이 있고 둘 다 걸러야 한다.
+#
+#   ① 지시문 반향 — 시킨 말을 칸에 그대로 베낀다.
+#      "한 문장(60자 이내)" 이 요약으로 들어왔다 (2026-08-16, 6건 중 4건).
+#   ② 원문 논평 — 내용을 요약하지 않고 원문을 **평한다**.
+#      "이 대화는 매우 혼란스럽고 문맥이 불명확합니다" (같은 날, 지시를
+#      스키마로 옮긴 뒤 5건 중 4건). 통과율은 올랐는데 쓸모는 더 떨어졌다.
+#
+# 둘 다 '요약해야 할 내용을 못 찾았을 때' 나오는 같은 증상이다.
+_ECHO_WORDS = ("한 문장", "60자", "이내)", "불릿", "빈 배열", "받아쓴",
+               "지어내지", "대괄호", "오인식", "요약하라", "적어라",
+               "이 대화는", "이 글은", "이 통화는", "받아쓰기입니다",
+               "다음과 같습니다", "불명확합니다", "혼합되어 있", "포함되어 있습니다")
+
+# ⚠ 지시는 **스키마의 description 에** 담는다. 프롬프트 본문에 두면 모델이
+#   그 문장을 칸에 그대로 베껴 넣는다 — 실측 2026-08-16, 여섯 건 중 네 건이
+#   요약 칸에 "한 문장(60자 이내)" 을 적었다(33% 성공).
+#   description 은 '무엇을 담는 칸인가' 로 읽히고 본문과 섞이지 않는다.
+_LOCAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "요약": {
+            "type": "string",
+            "description": "대화 전체를 한국어 한 문장으로. 60자 이내. "
+                           "실제로 오간 내용만 쓴다.",
+        },
+        "오간내용": {
+            "type": "array", "items": {"type": "string"},
+            "description": "무슨 얘기가 오갔는지 2~4개. 각 항목은 한 줄.",
+        },
+        "해야할일": {
+            "type": "array", "items": {"type": "string"},
+            "description": "하기로 한 일. 없으면 빈 배열.",
+        },
+        "다음일정": {
+            "type": "array", "items": {"type": "string"},
+            "description": "때가 분명한 약속만. '[내일 오후 3시] 자재 발주 회의' "
+                           "처럼 대괄호에 때를 넣는다. 때가 흐릿하면 대괄호 없이. "
+                           "없으면 빈 배열.",
+        },
+    },
+    "required": ["요약", "오간내용", "해야할일", "다음일정"],
+}
+
+
+def _summarize_local(lines: list[str], kind: str = "통화") -> str:
+    """로컬 모델(ollama)로 정리. 실패하면 빈 문자열 — 부르는 쪽이 클로드로 간다."""
+    if not getattr(config, "CALL_SUMMARY_LOCAL", False):
+        return ""
+    try:
+        import gatekeeper
+
+        head = {"미팅": "회의", "통화": "통화"}.get(kind, "대화")
+        # ⚠ 원문을 **먼저**, 지시는 짧게 **뒤에**. 지시가 원문 바로 앞에
+        #   있으면 모델이 그 문장을 답으로 이어 쓴다. 자세한 지시는
+        #   스키마 description 이 들고 있다.
+        prompt = (
+            "\n".join(lines[:400])[:14000]
+            + f"\n\n— 위는 {head} 중에 받아쓴 것이다. 받아쓰기라 오인식이 섞여 "
+              "있으니 문맥으로 읽되, 들린 것만 쓰고 지어내지 마라. "
+              "확신 없는 고유명사는 그대로 두라. 한국어로 답하라.")
+        # ⚠ num_predict 를 넉넉히. 생각 칸이 앞에서 토큰을 먹는데 모자라면
+        #   JSON 이 잘려 매번 실패한다(실측: 600 이면 빈 답, 4000 이면 8초에 성공).
+        raw = gatekeeper._generate(
+            prompt, timeout=float(getattr(config, "CALL_SUMMARY_LOCAL_TIMEOUT", 240)),
+            num_predict=4000, temperature=0.3, format=_LOCAL_SCHEMA)
+        d = json.loads(raw)
+    except Exception:
+        return ""
+
+    def _sec(title: str, items) -> list[str]:
+        items = [str(x).strip() for x in (items or []) if str(x).strip()]
+        rows = [f"- {x}" for x in items] or ["(없음)"]
+        return [f"## {title}", *rows, ""]
+
+    summary = str(d.get("요약") or "").strip()
+    if not summary:
+        return ""
+    # ⚠ 지시문 반향. 소형·중형 모델이 칸을 채우지 못하면 **시킨 말을 그대로
+    #   베껴 넣는다** — 실측 2026-08-16: 요약 칸에 "한 문장(60자 이내)" 이
+    #   들어왔다. 그대로 두면 위키에 그 말이 요약으로 남고, 소리로도 나간다.
+    #   게이트키퍼가 같은 이유로 _SUM_ECHO 를 두고 있다.
+    #   반향이면 빈손으로 돌아가 클로드가 다시 하게 한다.
+    if any(k in summary for k in _ECHO_WORDS) or len(summary) < 8:
+        return ""
+    body = [summary, ""]
+    if kind == "미팅":
+        body += _sec("핵심 논의", d.get("오간내용"))
+    else:
+        body += _sec("오간 내용", d.get("오간내용"))
+    body += _sec("해야 할 일", d.get("해야할일"))
+    body += _sec("다음 일정·약속", d.get("다음일정"))
+    return "\n".join(body).strip()
+
+
 def _summarize_claude(lines: list[str], kind: str = "미팅") -> str:
     """클로드 정리 — 미팅·GPT 모드 전용 (사장님 지시: 정리는 무조건 클로드).
 
@@ -219,7 +329,7 @@ def save() -> tuple[str, Path | None]:
     #   소형 모델은 애매한 대목에 '모른다' 대신 '지어낸다'. 통화 요약은
     #   나중에 사장님이 사실로 믿고 움직이는 문서라 그 위험을 질 수 없다.
     #   즉시성이 필요한 복명복창과 달리 이건 통화가 끝난 뒤 스레드에서 돈다.
-    summary = _summarize_claude(lines, kind="통화")
+    summary = _summarize_local(lines, kind="통화") or _summarize_claude(lines, kind="통화")
 
     body = [
         f"# 통화 {_slug(started)}",

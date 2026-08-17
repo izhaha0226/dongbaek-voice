@@ -764,6 +764,8 @@ def _nudge_loop() -> None:
     seen_mail: set = set()
     next_mail = 0.0
     mem_tick = 0
+    check_tick = 0
+    said_checks: dict = {}      # 갈래 → 사라진 뒤 지난 판 수
     while True:
         time.sleep(config.NUDGE_CHECK_SEC)
         # 로그 회전은 전화 모드 검사보다 '앞' 이어야 한다 — 통화 중이라고
@@ -808,6 +810,59 @@ def _nudge_loop() -> None:
                     briefing._to_telegram("⏰ 일정 알림", line)
                 except Exception:
                     pass
+
+            # 자가 점검 — 스스로 이상을 알아채고 **먼저** 말한다.
+            #
+            # ⚠ 이게 없던 동안, 고친 것 대부분이 사장님이 겪고 물어봐야
+            #   시작됐다. 2026-08-16 저녁이 그 예다 — 들림 83건 중 명령
+            #   6건이었는데(마이크가 목소리를 거의 못 잡았다) 동백은 한
+            #   시간 넘게 아무 말도 안 했고, "텔레그램에 전혀 안 들어오네"
+            #   하셔서야 알았다. 채점은 그동안 계속 돌고 있었다.
+            #
+            # ⚠ 같은 말을 되풀이하지 않는다. 이상은 대개 몇 시간 이어지는데
+            #   그때마다 말하면 그게 소음이고, 소음이 되면 다음부터 안 듣는다.
+            #
+            # ⚠ 되풀이인지는 **갈래**로 가른다. 문장에는 "들림 102건 중 명령
+            #   6건" 처럼 볼 때마다 바뀌는 숫자가 박혀 있어, 문장으로 비교하면
+            #   같은 이상이 매번 새것으로 보인다. 08-16 22:29~08-17 01:05 에
+            #   똑같은 점검이 텔레그램으로 11번 나간 것이 그래서다.
+            check_tick += 1
+            if (getattr(config, "SELFCHECK_ENABLED", True)
+                    and check_tick >= config.SELFCHECK_EVERY):
+                check_tick = 0
+                try:
+                    import selfcheck
+
+                    # ⚠ 고르는 것도 잊는 것도 selfcheck 가 한다. 여기에
+                    #   베껴 두면 시험이 그 사본을 흉내 내느라 정작 데몬이
+                    #   틀린 것을 못 잡는다.
+                    fresh = selfcheck.pick_fresh(selfcheck.check_kinds(),
+                                                 said_checks)
+                    if fresh:
+                        line = " ".join(t for _, t in fresh)
+                        log(f"자가점검: {line[:90]}")
+                        # ⚠ 소리로 말하지 않는다. 점검은 급한 일이 아니고,
+                        #   사장님이 무엇을 하고 계신지 동백은 모른다.
+                        #
+                        #   2026-08-16 23:14 실사례 — TV 보고 계신데 이 점검이
+                        #   소리로 끼어들었고, 사장님이 "TV 보고 있어" 하셔서
+                        #   동백이 그제야 입을 다물었다. 하루 종일 '끼어들지
+                        #   말 것' 을 고쳐 놓고 새로 만든 기능이 그 짓을 했다.
+                        #
+                        #   게다가 첫 번째 점검 항목이 '마이크가 안 잡힌다'
+                        #   인데, 그걸 소리로 알리는 건 앞뒤가 안 맞는다 —
+                        #   안 들리는 상황이라 말해 봐야 못 들으신다.
+                        #   폰은 조용히 쌓이고 사장님이 볼 때 본다.
+                        try:
+                            import briefing
+
+                            briefing._to_telegram(
+                                "🩺 동백 자가점검",
+                                "\n".join("· " + t for _, t in fresh))
+                        except Exception:
+                            pass
+                except Exception as e:
+                    log(f"자가점검 오류: {type(e).__name__}")
 
             # 메모리 지킴이 — 부족하면 허용목록만 정리하고 보고한다
             mem_tick += 1
@@ -1220,6 +1275,12 @@ def enroll_by_voice(listener, name: str) -> str:
         name = router.clean_name(audio_mod.transcribe(audio))
         if not name:
             return "이름을 알아듣지 못했습니다. 다시 말씀해 주세요."
+        # 되물었더니 호출어가 돌아오는 일이 있다 — 사장님이 "동백아" 하고
+        # 부르시는 소리가 그대로 이름으로 들어갔다 (2026-08-17, 지문에
+        # '동백이' 가 생겼다). 이름이 아닌 걸 알면 저장하지 않는다.
+        if router.is_wake_like(name):
+            return (f"'{name}' 은 제 이름이라 등록할 수 없습니다. "
+                    f"등록하실 분 이름을 말씀해 주세요.")
 
     total = len(config.ENROLL_SENTENCES)
     speak.say(f"{name} 목소리를 등록하겠습니다. {total}문장을 따라 말씀해 주세요.")
@@ -1581,6 +1642,94 @@ def _skill_from_recent(command: str) -> str:
     return msg
 
 
+# ── 오래 걸릴 때 "작업 중입니다" ────────────────────────────
+#
+# 사장님 지시 2026-08-17: "중간중간 작업중임을 알려줘. 그래야 또 안 부르지."
+#
+# 다시 부르시면 앞뒤 명령이 합쳐져 눈덩이가 굴러간다. 침묵을 메우는 게
+# 예의 문제가 아니라 동작 문제인 이유다.
+#
+# ⚠ 문구를 돌려 쓴다. 2026-08-12 에 같은 말만 반복하다 "조금만더
+#   기다려주세요 하고 또 생까네" 를 들었다. 게다가 speak.say 는 같은
+#   문장이 대기·재생 중이면 통째로 버리므로, 안 돌리면 두 번째 알림이
+#   조용히 사라져 오히려 더 감감무소식이 된다.
+_WORKING_LINES = (
+    "작업 중입니다. 조금만 기다려 주세요.",
+    "아직 하고 있습니다.",
+    "조금 더 걸리고 있습니다.",
+    "계속 진행 중입니다.",
+)
+# 숫자를 그대로 넘기면 TTS 가 "1분" 을 어떻게 읽을지 판마다 다르다.
+# 소리로 나갈 말이라 한글로 박아 둔다.
+_MINUTES_KO = ("", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구", "십")
+
+
+def _working_line(n: int, elapsed: float) -> str:
+    """n 번째 알림 문구. 오래 걸릴수록 몇 분 지났는지를 같이 말한다.
+
+    ⚠ 표를 넘어가면 앞으로 돌아간다(순환). 처음엔 마지막 문장에 눌러
+      두었는데(min), 그러면 실제 간격에서 5·6번째가 4번째와 글자까지
+      똑같아진다 — 72·92·112초는 전부 '일분' 이라 뒤에 붙는 말도 같다.
+      그러면 speak.say 의 중복 차단에 걸려 **가장 오래 기다리실 때
+      알림이 조용히 사라진다.** 막으려던 바로 그 사고다.
+    """
+    line = _WORKING_LINES[(n - 1) % len(_WORKING_LINES)]
+    mins = int(elapsed // 60)
+    if 1 <= mins < len(_MINUTES_KO):
+        return f"{line} {_MINUTES_KO[mins]}분 넘었습니다."
+    return line
+
+
+class WorkingNotice:
+    """긴 호출 동안 살아 있음을 알린다. 답이 나오기 시작하면 스스로 조용해진다.
+
+    소리가 겹칠 일은 없다 — 알림 우선순위로 넣으므로 speak.say 가
+    "답변이 있으면 알림은 말하지 않는다" 규칙으로 알아서 삼킨다.
+    미팅 모드에서도 같은 자리에서 삼켜진다.
+
+    with 문을 나가면 반드시 멈춘다. 예외로 빠져나가도 마찬가지다 —
+    호출이 터졌는데 "작업 중" 만 계속 나가면 그게 제일 나쁘다.
+    """
+
+    def __init__(self, speaker) -> None:
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.said = 0
+        # 소리를 낼 상대가 없으면 아예 돌지 않는다.
+        self.enabled = bool(speaker) and getattr(config, "WORKING_NOTICE", True)
+
+    def __enter__(self) -> "WorkingNotice":
+        if self.enabled:
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+        return self
+
+    def hush(self) -> None:
+        """첫 답 조각이 도착했다. 이제부터는 답이 말한다."""
+        self._stop.set()
+
+    def _loop(self) -> None:
+        t0 = time.monotonic()
+        wait = getattr(config, "WORKING_NOTICE_FIRST", 12.0)
+        every = getattr(config, "WORKING_NOTICE_EVERY", 20.0)
+        cap = getattr(config, "WORKING_NOTICE_MAX", 6)
+        n = 0
+        while not self._stop.wait(wait):
+            n += 1
+            if n > cap:
+                # 여기까지 왔으면 알림이 도움이 안 되는 상황이다.
+                # 더 떠들어 봐야 소음이라 그만둔다.
+                log(f"작업 알림 {cap}회로 멈춤 (총 {time.monotonic() - t0:.0f}초)")
+                return
+            speak.say(_working_line(n, time.monotonic() - t0),
+                      block=False, priority=speak.PRIORITY_NOTICE)
+            self.said += 1
+            wait = every
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+
+
 def handle(command: str, *, confirm, source: str = "voice", heard: str = "",
            speaker=None, who: str = "") -> str:
     """명령 하나를 끝까지 처리하고 사용자에게 말할 문장을 반환.
@@ -1853,13 +2002,23 @@ def handle(command: str, *, confirm, source: str = "voice", heard: str = "",
     #   stream=(on_text is not None) 으로 스트리밍 여부를 정하므로,
     #   재보겠다고 콜백을 항상 넘기면 소리를 낼 상대도 없는 호출까지
     #   스트리밍으로 바뀐다. 계측이 동작을 바꾸면 안 된다.
+    # 오래 걸리면 "작업 중입니다" 를 주기적으로 알린다. 첫 조각이 오는
+    # 순간 입을 다문다 — 답이 나가기 시작하면 알림은 방해일 뿐이다.
+    notice = WorkingNotice(speaker)
+
     def _feed(text):
         _ct.mark_first()
+        notice.hush()
         speaker.feed(text)
 
     try:
-        reply, meta = bridge.ask(prompt, elevated=elevated, dev=dev,
-                                 on_text=_feed if speaker else None)
+        with notice:
+            reply, meta = bridge.ask(prompt, elevated=elevated, dev=dev,
+                                     on_text=_feed if speaker else None)
+        # 스트리밍이 아니면 _feed 가 한 번도 안 불린다. 그때는 여기가
+        # 입을 다무는 자리다 (with 를 나오며 이미 멈췄지만, 뒤늦게 뜬
+        # 알림이 답을 앞지르지 않도록 한 번 더 못박는다).
+        notice.hush()
         _ct.ok = True
     except bridge.AuthError as e:
         log(f"인증 오류: {e}")
@@ -2680,12 +2839,25 @@ def run_daemon() -> int:
                 followup_until = time.monotonic() + config.FOLLOWUP_WINDOW_SEC
                 continue
 
-            if (router.is_voice_correction(router.normalize(command))
-                    or router.is_voice_enroll_request(router.normalize(command))):
+            # 되살릴 거절이 눈앞에 있나. 있으면 복구가 절차보다 먼저다 —
+            # 못 알아들어서 답답하신 참에 "다섯 문장 읽으세요" 는 더 답답하다.
+            _aud, _at = _LAST_REJECT["audio"], _LAST_REJECT["at"]
+            _fresh_reject = (_aud is not None
+                             and time.monotonic() - _at < config.VOICE_FORGIVE_WINDOW_SEC)
+
+            # ⚠ 순서가 사고였다 (2026-08-17). 아래 가벼운 분기가 '목소리 +
+            #   등록' 을 통째로 삼키고 continue 해서, 5문장 정식 등록에는
+            #   음성으로 도달할 방법이 아예 없었다 — 죽은 코드였다.
+            #   사장님이 "내 목소리 등록해줘" 하셨는데 "지금 목소리를 홍길동
+            #   목소리로 기억했습니다" 한마디로 끝난 게 이것이다.
+            #   말뜻대로 갈라, '등록/추가' 는 아래를 건너뛰고 정식으로 간다.
+            if (not (router.wants_formal_enroll(command) and not _fresh_reject)
+                    and (router.is_voice_correction(router.normalize(command))
+                         or router.is_voice_enroll_request(router.normalize(command)))):
                 import voiceprint
 
-                aud, at = _LAST_REJECT["audio"], _LAST_REJECT["at"]
-                fresh = aud is not None and time.monotonic() - at < config.VOICE_FORGIVE_WINDOW_SEC
+                aud, at = _aud, _at
+                fresh = _fresh_reject
                 if fresh and voiceprint.forgive(who, aud):
                     _LAST_REJECT["audio"] = None
                     reply = f"방금 그 말씀을 {who} 목소리로 새로 배웠습니다."
@@ -2721,6 +2893,19 @@ def run_daemon() -> int:
             enroll_name = router.enroll_request(command)
             if enroll_name is not None:
                 state["ptt_until"] = 0.0
+                # "내 목소리 등록해줘" — 누구 목소리인지는 이미 안다.
+                #
+                # ⚠ 2026-08-17 사고. 이름을 못 뽑으면 "등록할 이름을 말씀해
+                #   주세요" 하고 되물었는데, 그 대답이 '동백이' 로 받아써져
+                #   호출어가 이름이 됐다. 지문에 '동백아' 5개, '동백이' 1개가
+                #   생겨 사장님 목소리가 셋으로 쪼개졌다.
+                #
+                #   되물을 이유가 없었다. 이 자리는 _speaker_ok 를 통과한
+                #   뒤라 who 가 이미 확정돼 있다 — '내 목소리' 는 곧 who 다.
+                #   한 번 더 묻는 건 틀릴 기회를 한 번 더 주는 것뿐이다.
+                if not enroll_name and who and not router.is_wake_like(who):
+                    enroll_name = who
+                    log(f"이름 미지정 → 확인된 화자 '{who}' 로 등록")
                 log(f"목소리 등록 요청: {enroll_name or '(이름 미지정)'}")
                 reply = enroll_by_voice(listener, enroll_name)
                 speak.say(reply)

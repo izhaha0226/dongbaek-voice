@@ -472,8 +472,18 @@ def news() -> tuple[str, str]:
         pass
 
     sp = ["여덟 시 뉴스 브리핑입니다.", style["lead"]]
-    if ko:
-        sp.append("해커뉴스. " + " ".join(f"{k}." for k in ko[:3]))
+    # 번역된 것만 읽는다. to_korean 은 실패한 항목을 영문 원문 그대로
+    # 돌려주는데(올라마가 꺼져 있으면 전부 실패한다), 그게 소리로 가면
+    # speak.korean_only 가 문장째 덜어내 머리말만 남는다 —
+    # 2026-08-17 08:00 실측: 세 줄 중 두 줄이 통째로 사라지고
+    # 'Claude: System Prompts' 한 조각만(알파벳 19자, 문턱 20자 미달) 새어
+    # 나가, "해커뉴스." 뒤가 빈 채로 다음 꼭지로 넘어갔다.
+    # 빈 머리말을 읊느니 왜 없는지 밝힌다 — 침묵은 고장으로 보인다.
+    ko_spoken = [k for k in ko[:3] if re.search(r"[가-힣]", k)]
+    if ko_spoken:
+        sp.append("해커뉴스. " + " ".join(f"{k}." for k in ko_spoken))
+    elif hn:
+        sp.append(f"해커뉴스 {len(hn)}건은 번역이 안 돼서 소리로는 안 읽었어요.")
     if ai:
         heads = [a["title"].rsplit(" - ", 1)[0] for a in ai[:2]]
         sp.append("AI 마케팅 소식. " + " ".join(f"{h}." for h in heads))

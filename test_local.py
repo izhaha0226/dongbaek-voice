@@ -158,7 +158,7 @@ WRITES = [
 ]
 
 # 등록형은 이제 승인 없이 통과해야 한다 (그래도 로컬이 함부로 만들진 않는다)
-for q in ["내일 오후 3시에 배움창작소 미팅 잡아줘", "8월 20일 2시 회의 등록해줘"]:
+for q in ["내일 오후 3시에 마바공방 미팅 잡아줘", "8월 20일 2시 회의 등록해줘"]:
     check(f"{q!r} → 승인 없이 통과", router.danger_hit(q), None)
 for q in WRITES:
     check(f"{q!r} → 로컬이 실행 안 함", router.handle_local(q, elevated=False), None)
@@ -267,7 +267,7 @@ for said in [
 #   브리핑이 통째로 돌아온다 — 그것 때문에 이 기능이 생겼다.
 for said, want in [("강남 미팅 언제야", "강남"),
                    ("본사 미팅 몇시야", "본사"),
-                   ("배움창작소 일정 알려줘", "배움창작소")]:
+                   ("마바공방 일정 알려줘", "마바공방")]:
     check(f"{said!r} → {want!r}", router.schedule_keyword(said), want)
 
 print("\n[10b] 오늘·이름 조회는 이미 지난 일정도 본다")

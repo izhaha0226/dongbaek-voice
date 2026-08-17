@@ -66,6 +66,9 @@ ALLOWED = {
     "config.py",        # 경로 정의 (구명정)
     "dbstore.py",       # backfill — 옛 기록을 DB 로 옮기는 이행 도구
     "dongbaek.py",      # record() 의 구명정 쓰기
+    # 자가 점검은 구명정 파일이 **자랐는지** 만 본다. 그 파일에 줄이 생겼다는
+    # 것은 DB 쓰기가 실패했다는 뜻이라, 읽는 게 아니라 신호로 쓰는 것이다.
+    "selfcheck.py",
 }
 offenders = []
 for py in sorted(ROOT.glob("*.py")):

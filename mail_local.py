@@ -153,6 +153,24 @@ NOTICE_SERVICES = {
 NOTICE_ADDRS = ("no-reply", "noreply", "no_reply", "donotreply", "do-not-reply",
                 "notification", "notice@", "alert@")
 
+# 표시 이름 없이 주소만 오는 발신을 소리로 부를 때, 아이디가 곧 사람인 도메인.
+# ⚠ 회사 도메인은 넣지 마라 — 회사 메일은 도메인이 누구인지를 말하고
+#   아이디는 "google.account.support.B" 처럼 읽어도 못 알아듣는다.
+PERSONAL_DOMAINS = ("gmail", "naver", "daum", "hanmail", "kakao", "nate",
+                    "outlook", "hotmail", "icloud", "yahoo")
+
+
+def _domain_label(address: str) -> str:
+    """주소에서 부를 이름 하나. "accounts.google.com" 은 맨 앞이 아니라
+    뒤에서 두 번째 조각이 서비스 이름이다.
+
+    첫 글자를 올리는 건 멋이 아니라 중복 방지다 — 같은 구글이 표시
+    이름으로도 오고 주소로도 와서 "Google, google" 둘로 세어졌다.
+    """
+    parts = address.rpartition("@")[2].split(".")
+    label = (parts[-2] if len(parts) >= 2 else parts[0])[:16]
+    return (label[:1].upper() + label[1:]) if label else ""
+
 
 def notice_service(sender: str = "", address: str = "") -> str | None:
     """알림성 발신이면 묶어 셀 서비스 이름, 사람이 보낸 것이면 None.
@@ -168,14 +186,33 @@ def notice_service(sender: str = "", address: str = "") -> str | None:
         name = (sender or "").split("<")[0].strip().strip('"')
         if name and "@" not in name:
             return name[:16]
-        # 이름이 없으면 주소의 도메인으로 부른다. "accounts.google.com" 은
-        # 맨 앞이 아니라 뒤에서 두 번째 조각이 서비스 이름이다.
-        # 첫 글자를 올리는 건 멋이 아니라 중복 방지다 — 같은 구글이 표시
-        # 이름으로도 오고 주소로도 와서 "Google, google" 둘로 세어졌다.
-        parts = address.rpartition("@")[2].split(".")
-        label = (parts[-2] if len(parts) >= 2 else parts[0])[:16]
-        return (label[:1].upper() + label[1:]) if label else "알림"
+        # 이름이 없으면 주소의 도메인으로 부른다.
+        return _domain_label(address) or "알림"
     return None
+
+
+def spoken_sender(sender: str = "", address: str = "") -> str:
+    """소리로 읽을 보낸이 이름. 표시 이름이 있으면 그대로 쓴다.
+
+    이름 없이 주소만 온 발신을 그대로 읽으면 주소가 통째로 소리가 된다 —
+    2026-08-16 12:56 에 "최근 메일 3건" 답의 첫 건이
+    "noreply-apps-scripts-notifications@google.com님의" 로 나갔다. 44자를
+    먹고, 들어도 못 알아듣는 자리다.
+
+    알림성이면 서비스 이름으로, 개인 메일이면 아이디로, 나머지는 도메인으로
+    부른다. 누가 보냈는지는 남고 못 알아들을 부분만 사라진다.
+    """
+    name = (sender or "").split("<")[0].strip().strip('"')
+    if name and "@" not in name:
+        return name
+    addr = (address or sender or "").split("<")[-1].strip().strip(">").strip()
+    svc = notice_service(sender, addr)
+    if svc:
+        return svc
+    local, _, domain = addr.partition("@")
+    if any(d in domain.lower() for d in PERSONAL_DOMAINS):
+        return local[:16] or addr
+    return _domain_label(addr) or addr
 
 
 def received_brief(hours: int = 6, max_scan: int = 30) -> list[dict] | None:
@@ -346,15 +383,11 @@ end tell''')
     if not items:
         return "받은 메일이 없습니다."
 
-    def clean(s):
-        # "이름 <메일주소>" 에서 이름만. 주소는 소리로 들어도 못 알아듣는다.
-        name = s.split("<")[0].strip().strip('"')
-        return name or s.split("<")[0]
-
     lines = []
     for i in items[:limit]:
         sender, _, subject = i.partition(" ▸ ")
-        lines.append(f"{clean(sender)}님의 {subject.strip()}")
+        # 주소는 소리로 들어도 못 알아듣는다 — spoken_sender 가 이름으로 바꾼다.
+        lines.append(f"{spoken_sender(sender)}님의 {subject.strip()}")
     return f"최근 메일 {len(lines)}건입니다. " + ", ".join(lines) + "."
 
 

@@ -100,7 +100,7 @@ def recall(query: str, k: int = 3,
         return []
     try:
         with _conn() as con:
-            rows = con.execute("select ts, text, emb from memories").fetchall()
+            rows = con.execute("select ts, text, emb, kind from memories").fetchall()
     except sqlite3.Error:
         return []
     if not rows:
@@ -108,9 +108,41 @@ def recall(query: str, k: int = 3,
     embs = np.frombuffer(b"".join(r[2] for r in rows), dtype=np.float32)
     embs = embs.reshape(len(rows), -1)
     sims = embs @ q
-    order = np.argsort(-sims)[: k * 3]
+
+    # 진행 중인 계획은 지나간 잡담보다 앞에 세운다.
+    #
+    # ⚠ 2026-08-17. 사장님이 "2단계 진행하자" 하셨는데 동백이 "2단계로 뭘
+    #   하기…" 하고 되물었다. "기억이 없어서 2단계가 뭔지 모른다는데.. 이런건
+    #   DB를 활용하든 메모리에 저장하든 해야할거 아냐" 는 지적을 받았다.
+    #
+    #   계획을 넣고 나서도 절반은 옛 잡담에 묻혔다. 당연하다 — dialog 가
+    #   1,039건이고 plan 은 5건이다. 닮은 정도만 보면 수가 많은 쪽이 이긴다.
+    #
+    #   그런데 이 둘은 값어치가 다르다. dialog 는 '그때 그런 말을 했다' 이고
+    #   plan 은 '지금 하고 있는 일' 이다. 지금 일을 묻는데 옛 잡담을 꺼내면
+    #   그건 기억이 아니라 소음이다. 그래서 얹어 준다.
+    #
+    #   문턱을 낮추는 게 아니라 순서만 바꾼다 — min_sim 은 그대로라
+    #   엉뚱한 계획이 억지로 끌려 나오지는 않는다.
+    #   ⚠ 얹은 값으로 문턱을 재면 안 된다. 처음에 sims 자체에 더했더니
+    #     "오늘 광고비 얼마야" 에 계획이 딸려 나왔다 — 0.30 짜리가 0.08 을
+    #     얻어 0.35 문턱을 넘은 것이다. 그건 순서를 바꾼 게 아니라 문턱을
+    #     낮춘 것이다. 그래서 **줄 세우기에만** 쓰고, 통과 여부는 원래
+    #     닮은 정도로 판단한다.
+    #   ⚠ 얹는 값은 아주 작아야 한다. 이 임베딩(e5)은 닮은 정도가
+    #     0.79~0.90 좁은 띠에 몰린다 — 실측. 그 안에서 0.08 은 거의
+    #     '무조건 1등' 이라, "오늘 광고비 얼마야" 에 계획이 딸려 나왔다
+    #     (관련 기억 0.902 vs 계획 0.823+0.08=0.903). 0.02 면 원래
+    #     비슷하던 것들 사이에서만 순서가 뒤집힌다.
+    boost = getattr(config, "MEMORY_PLAN_BOOST", 0.02)
+    rank = sims
+    if boost:
+        rank = sims + np.array([boost if r[3] == "plan" else 0.0 for r in rows],
+                               dtype=sims.dtype)
+    order = np.argsort(-rank)[: k * 3]
     out = []
     for i in order:
+        # 문턱은 원래 닮은 정도로 — 얹은 값(rank)이 아니라 sims 로 본다.
         if sims[i] < min_sim or len(out) >= k:
             break
         ts, text = rows[int(i)][0], rows[int(i)][1]

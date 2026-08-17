@@ -542,7 +542,7 @@ for said in [
           router.is_calendar_create(said), True)
 
 print("\n[1i] 진짜 옮기라는 말은 여전히 옮기기다")
-for said in ["본사 미팅 11시로 옮겨줘", "배움창작소 미팅 4시로 변경해줘"]:
+for said in ["본사 미팅 11시로 옮겨줘", "마바공방 미팅 4시로 변경해줘"]:
     n = router.normalize(said)
     moving = (not any(w in n for w in ("추가", "생성", "만들", "잡아", "넣어", "등록"))
               and any(w in n for w in ("옮겨", "미뤄", "당겨", "연기해", "변경해", "바꿔줘")))

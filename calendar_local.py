@@ -8,12 +8,36 @@
 권한: 최초 실행 시 macOS 가 캘린더 접근을 묻는다. 터미널에서 한 번 허용해야 한다.
 """
 
+import os
+import sys
 from datetime import datetime, timedelta
 
 import config
 
 _store = None
 _denied = False
+
+
+def _is_test_run() -> bool:
+    """시험 중인가. 맞으면 캘린더에 쓰지 않는다.
+
+    ⚠ 2026-08-17 사고. 사장님 캘린더에 '큐에이확인' 이 47건 쌓였다.
+      tests/test_tonight_qa.py 가 router.handle_local("내일 오후 4시
+      큐에이확인 등록해줘") 를 가로채기 없이 태워서, **시험을 돌릴 때마다
+      진짜 일정이 하나씩 생겼다.**
+
+      시험은 끝에서 지우기도 한다. 그래서 본전이어야 하는데, 한 번이라도
+      삭제가 어긋나 2건이 되는 순간 delete_matching 이 "여러 건이라 애매하다"
+      며 손을 뗀다(그 판단 자체는 옳다). 그 뒤로는 만들기만 하고 못 지운다 —
+      되돌아오지 않는 톱니바퀴다. 47건이 그렇게 쌓였다.
+
+      고치는 자리는 시험 파일이 아니라 여기다. 아홉 개 시험이 이 경로를
+      태우고 있고, 파일마다 가로채기를 넣는 건 규율에 기대는 것이라
+      새 시험이 하나 생길 때마다 다시 뚫린다. 문을 잠그는 게 맞다.
+
+      판정은 이미 이 저장소가 쓰는 방식 그대로다 (dongbaek.py 세 곳).
+    """
+    return os.path.basename(sys.argv[0] or "").startswith("test_")
 
 
 def _get_store():
@@ -158,6 +182,8 @@ def create(title: str, start: datetime, hours: float = 1.0) -> str | None:
     ⚠ 이 함수는 되돌릴 수 없는 작업이다. 반드시 위험 게이트를 통과한 뒤에만
       호출되어야 한다 (dongbaek.handle 이 danger 판정을 먼저 한다).
     """
+    if _is_test_run():
+        return "시험 실행이라 캘린더에 쓰지 않았습니다."
     store = _get_store()
     if store is None:
         return None
@@ -193,6 +219,8 @@ def delete_matching(keyword: str, days: int = 60) -> str | None:
     ⚠ 되돌릴 수 없다. 위험 게이트 통과 후에만 호출할 것.
     여러 건이 걸리면 지우지 않고 되묻는다 — 엉뚱한 걸 지우는 것보다 낫다.
     """
+    if _is_test_run():
+        return "시험 실행이라 캘린더를 건드리지 않았습니다."
     store = _get_store()
     if store is None:
         return None
@@ -227,6 +255,8 @@ def delete_day(target, label: str = "오늘") -> str | None:
     반드시 위험 게이트(복창+진행)를 통과한 뒤에만 부를 것 — router 가
     danger 목록으로 보장한다.
     """
+    if _is_test_run():
+        return "시험 실행이라 캘린더를 건드리지 않았습니다."
     store = _get_store()
     if store is None:
         return None

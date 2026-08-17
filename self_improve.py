@@ -508,6 +508,17 @@ def _workspace_open() -> tuple[Path, str, str]:
         return ROOT, "", "워크트리를 못 만듦"
     if not (path / "self_improve.py").exists():
         return ROOT, "", "워크트리가 비어 있음"
+    # ⚠ .venv 는 git 이 추적하지 않아 새 체크아웃에 안 따라온다. 그런데 검증은
+    #   `.venv/bin/python` 을 그대로 부른다(run_suite, test_import_shadow) —
+    #   없으면 워크트리 회차가 통째로 터진다. 2026-08-16 13:30 실측: 검증도
+    #   되돌리기도 보고도 못 하고 끝났고, 고친 코드는 워크트리에 남았다.
+    #   가상환경은 체크아웃이 아니라 기계에 딸린 것이라 본 트리 것을 이어 붙인다.
+    #   (worktree remove 는 심링크만 끊고 본체는 안 건드리는 것을 확인했다.)
+    try:
+        if not (path / ".venv").exists():
+            (path / ".venv").symlink_to(ROOT / ".venv")
+    except OSError:
+        pass                               # 못 걸어도 run_suite 가 본 트리 것을 쓴다
     return path, branch, f"사람이 작업 중이라 별도 워크트리({branch})에서"
 
 
@@ -536,6 +547,16 @@ def _workspace_land(branch: str, work: Path) -> tuple[bool, str]:
 def run_suite(repo: Path) -> tuple[bool, str]:
     """전체 테스트 독립 재검증 — 클로드의 말을 믿지 않는다."""
     py = repo / ".venv" / "bin" / "python"
+    # ⚠ 별도 워크트리에는 .venv 가 없다. git 이 추적하지 않는 폴더라 새 체크아웃에
+    #   안 따라온다 — 그래서 사람이 작업 중인 밤(워크트리 회차)마다 여기서
+    #   FileNotFoundError 로 통째로 터졌다. 2026-08-16 13:30 실측: 검증도
+    #   되돌리기도 보고도 못 하고 끝났고, 고친 코드는 워크트리에 남았다.
+    #   가상환경은 체크아웃이 아니라 기계에 딸린 것이므로 본 트리 것을 빌린다.
+    #   테스트는 cwd=repo 로 도니 import 는 그대로 그 워크트리 코드를 본다.
+    if not py.exists():
+        py = ROOT / ".venv" / "bin" / "python"
+    if not py.exists():                   # 가상환경 없이 도는 판(임시 저장소 시험)
+        py = Path(sys.executable)
     # 2026-08-13 정리로 테스트가 tests/ 로 옮겨졌다. 옛 위치도 함께 봐서
     # (임시 저장소를 쓰는 자기 시험 등) 어느 쪽이든 다 돈다.
     #

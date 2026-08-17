@@ -9,7 +9,7 @@ stdin으로 훅 JSON을 받아 transcript에서 마지막 assistant 텍스트를
 """
 import sys as _sys
 from pathlib import Path as _Path
-_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))  # 저장소 루트 임포트
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # 저장소 루트 임포트
 
 import json
 import os
